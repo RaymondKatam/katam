@@ -116,6 +116,7 @@ menuentry "Boot from the first hard disk" {
   chainloader +1
 }
 EOF
+mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 grub-mkrescue -o "$OUT" "$ISO" -- -volid "KATAM_NET_${VER//./_}" 2>&1 | grep -v "^xorriso : UPDATE" || true
 [[ -s $OUT ]] || { echo "ISO was not written" >&2; exit 1; }

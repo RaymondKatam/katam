@@ -186,6 +186,7 @@ menuentry "Boot from the first hard disk" {
 EOF
 
 echo "== 6/6 Writing ISO"
+mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 grub-mkrescue -o "$OUT" "$ISO" -- -volid "KATAM_${VER//./_}" 2>&1 | grep -v "^xorriso : UPDATE" || true
 [[ -s $OUT ]] || { echo "ISO was not written" >&2; exit 1; }
