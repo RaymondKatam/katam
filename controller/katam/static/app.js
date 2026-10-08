@@ -71,6 +71,29 @@ async function start() {
   refresh();
   schedule();
   if (state.me.admin) checkUpdates();
+  loadCluster();
+  setInterval(() => { if (!document.hidden) loadCluster(); }, 15000);
+}
+
+/* ---------- control-plane cluster ---------- */
+async function loadCluster() {
+  try {
+    const [c, integ] = await Promise.all([api("/api/v1/cluster"), state.integ ? state.integ : api("/api/v1/integrations")]);
+    state.integ = integ;
+    const pill = $("#cluster-pill");
+    if (c.mode === "single") { pill.hidden = true; } else {
+      pill.hidden = false;
+      pill.className = `pill ${c.leader ? "" : "warn"}`;
+      pill.textContent = c.leader
+        ? `Leader ${c.leader} · term ${c.term} · ${c.members.length} controller${c.members.length === 1 ? "" : "s"}`
+        : "No leader: control plane has no majority";
+      pill.title = c.members.map((m) => `${m.member}${m.member === c.leader ? " (leader)" : ""} ${m.version}`).join("\n")
+        + (c.etcd ? "\n" + c.etcd.map((e) => `etcd ${e.endpoint}: ${e.healthy ? "healthy" : "DOWN"}`).join("\n") : "");
+    }
+    const g = integ.grafana || {};
+    $("#grafana-link").hidden = !g.dashboard_url;
+    if (g.dashboard_url) $("#grafana-link").href = g.dashboard_url;
+  } catch { /* header extras are optional */ }
 }
 
 async function checkUpdates() {
@@ -532,10 +555,22 @@ $("#btn-pol").addEventListener("click", () => editPolicy(null));
 
 /* ---------- runbooks ---------- */
 async function loadRunbooks() {
-  const rbs = await api("/api/v1/runbooks");
+  const [rbs, git] = await Promise.all([api("/api/v1/runbooks"), api("/api/v1/gitops")]);
   $("#rb-table tbody").replaceChildren(...rbs.map((r) => el("tr", {},
-    el("td", {}, el("strong", {}, r.name)), el("td", {}, r.description || ""), el("td", {}, when(r.updated)),
-    el("td", {}, el("div", { class: "row-actions" }, btn("Run", () => runRunbook(r)), state.me.admin ? btn("Edit", () => editRunbook(r)) : null)))));
+    el("td", {}, el("strong", {}, r.name), r.managed_by === "git" ? el("span", { class: "badge", title: `${r.path} at ${r.commit}` }, "Git") : null),
+    el("td", {}, r.description || ""), el("td", {}, when(r.updated)),
+    el("td", {}, el("div", { class: "row-actions" }, btn("Run", () => runRunbook(r)),
+      state.me.admin && r.managed_by !== "git" ? btn("Edit", () => editRunbook(r)) : null)))));
+  const box = $("#gitops");
+  box.hidden = !git.enabled;
+  if (!git.enabled) return;
+  box.className = `status-strip ${git.ok === false ? "bad" : ""}`;
+  const parts = [el("span", {}, "Synced from "), el("code", {}, `${git.url} (${git.branch}/${git.path})`)];
+  if (git.commit) parts.push(el("span", { class: "muted" }, `commit ${git.commit.slice(0, 10)} · ${when(git.last_sync)} · ${git.managed} runbook(s)`));
+  if (git.ok === false) parts.push(el("strong", {}, `Last sync failed: ${git.error}`));
+  if (!git.commit && git.ok !== false) parts.push(el("span", { class: "muted" }, "not synced yet"));
+  if (state.me.admin) parts.push(btn("Sync now", () => run("/api/v1/gitops/sync", "POST")));
+  box.replaceChildren(...parts);
 }
 async function editRunbook(r) {
   let body = r ? r.source : "";
@@ -559,7 +594,33 @@ $("#btn-rb").addEventListener("click", () => editRunbook(null));
 $("#dlg-edit").addEventListener("close", () => { $("#edit-save").textContent = "Save"; });
 
 /* ---------- DR ---------- */
+async function loadDrWatch() {
+  const w = await api("/api/v1/dr/watch");
+  const box = $("#drwatch");
+  box.hidden = !w.enabled;
+  if (!w.enabled) return;
+  const labels = {
+    ok: "Primary site reachable", partitioned: "Link to the primary site is down, but the witness still sees it: no failover",
+    no_witness: "Primary not answering and the witness is unreachable: no failover without a second opinion",
+    primary_unreachable: "Primary site down (confirmed by the witness); waiting before acting",
+    awaiting_approval: "Primary site is down. Approve the failover to start the DR plan",
+    failing_over: "Failing over to this site", failed_over: "Running at this site after failover",
+  };
+  box.className = `status-strip ${["awaiting_approval", "primary_unreachable", "failing_over"].includes(w.state) ? "bad" : ["partitioned", "no_witness", "failed_over"].includes(w.state) ? "warn" : ""}`;
+  const parts = [el("strong", {}, "PR/DR watch"), el("span", {}, labels[w.state] || w.state),
+    el("span", { class: "muted" }, `primary ${w.primary} · plan ${w.plan} · since ${when(w.since)}`)];
+  if (state.me.admin && w.state === "awaiting_approval") {
+    parts.push(btn("Approve failover", () => {
+      const c = prompt(`This starts plan ${w.plan} in disaster mode at this site. Type the plan name to confirm.`);
+      if (c === w.plan) run("/api/v1/dr/watch/approve", "POST", { confirm: c }).then(loadDrWatch);
+    }, "small danger"));
+  }
+  if (state.me.admin && w.state === "failed_over") parts.push(btn("Watch again (after failback)", () => post("/api/v1/dr/watch/reset").then(loadDrWatch)));
+  box.replaceChildren(...parts);
+}
+
 async function loadDr() {
+  loadDrWatch().catch((e) => toast(e.message));
   const plans = await api("/api/v1/dr/plans");
   $("#dr-table tbody").replaceChildren(...plans.map((p) => {
     const r = p.last_result || {};

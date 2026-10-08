@@ -20,8 +20,13 @@ class Metering:
     def start(self):
         threading.Thread(target=self._loop, name="katam-metering", daemon=True).start()
 
+    gate = staticmethod(lambda: True)                  # leader-only when several controllers run
+
     def _loop(self):
         while not self._stop.wait(5 if not self._last_cpu else self.interval):
+            if not self.gate():
+                self._last_cpu = {}
+                continue
             try:
                 self.sample()
             except Exception:  # noqa: BLE001 - metering must never stop

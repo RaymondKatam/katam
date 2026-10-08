@@ -29,7 +29,25 @@ DEFAULTS = {
     },
     "ha": {"enabled": False, "interval_s": 10, "failures_before_fence": 3,
            "restart_delay_s": 5, "witness_url": None, "witness_token": None},
-    "dr": {"sites": {}},
+    "dr": {"sites": {},
+           # PR/DR watch, run by the DR site's controller: fail over (or ask for approval) only
+           # when this site AND the witness both can't reach the primary for after_s seconds.
+           "watch": {"enabled": False, "plan": None, "primary_host": None, "primary_port": 8080,
+                     "witness_url": None, "witness_token": None, "after_s": 120, "interval_s": 15,
+                     "approve": True}},
+    # Which controller runs cluster-wide services (see leader.py). single | postgres | etcd
+    "cluster": {"mode": "single", "member": None, "advertise_url": None,
+                "etcd": {"endpoints": [], "prefix": "/katam", "lease_ttl_s": 10,
+                         "ca": None, "cert": None, "key": None},
+                "vip": {"address": None, "interface": None}},
+    # Prometheus endpoint (/metrics) for Grafana. Scrapers need the token, or a listed address.
+    "metrics": {"enabled": True, "token": None, "allow": ["127.0.0.1/32", "::1/128"], "cache_s": 15},
+    # Optional: send events (failover, leader change, upgrades, runbook runs) as Grafana annotations.
+    "grafana": {"url": None, "token": None, "dashboard_uid": "katam-overview", "verify_tls": True},
+    # Runbooks kept in Git (GitOps). Push to the branch, the webhook or the timer syncs them.
+    "runbooks": {"git": {"url": None, "branch": "main", "path": ".", "interval_s": 300,
+                         "webhook_secret": None, "ssh_key": None, "token_file": None, "prune": True,
+                         "workdir": "/var/lib/katam/gitops/runbooks"}},
     "protection": {"scheduler_interval_s": 300, "max_lock_days": 3650, "vault": {"enabled": False}},
     "updates": {"feed_url": None, "channel": "stable", "check_interval_h": 6},
     "images": [],
@@ -94,6 +112,27 @@ def load_config(path):
             raise ConfigError(f"Network {net['name']}: ovn-vlan networks need 'vlan'")
     if cfg["sdn"]["enabled"] and not cfg["sdn"].get("central_node"):
         raise ConfigError("sdn.central_node is required when SDN is enabled")
+
+    cl = cfg["cluster"]
+    if cl["mode"] not in ("single", "postgres", "etcd"):
+        raise ConfigError("cluster.mode must be single, postgres or etcd")
+    if cl["mode"] != "single" and not c["database_url"].startswith("postgresql"):
+        raise ConfigError(f"cluster.mode {cl['mode']} needs a shared PostgreSQL database_url")
+    if cl["mode"] == "etcd":
+        if not cl["etcd"].get("endpoints"):
+            raise ConfigError("cluster.etcd.endpoints is required in etcd mode")
+        if float(cl["etcd"]["lease_ttl_s"]) < 3:
+            raise ConfigError("cluster.etcd.lease_ttl_s must be at least 3 seconds")
+    if cl["vip"].get("address") and not cl["vip"].get("interface"):
+        raise ConfigError("cluster.vip.interface is required with cluster.vip.address")
+    w = cfg["dr"]["watch"]
+    if w.get("enabled"):
+        for k in ("plan", "primary_host", "witness_url"):
+            if not w.get(k):
+                raise ConfigError(f"dr.watch.{k} is required when dr.watch is enabled")
+    g = cfg["runbooks"]["git"]
+    if g.get("url") and g.get("path", ".").startswith("/"):
+        raise ConfigError("runbooks.git.path is relative to the repository root")
     return cfg
 
 

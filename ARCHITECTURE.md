@@ -95,7 +95,7 @@ Runbooks are YAML files kept in git and run by the task engine. Each step has a 
 
 **Reports.** Scheduled PDF/CSV reports cover cost, capacity runway, DR test results and segmentation coverage.
 
-## Status in 0.3
+## Status in 0.5
 
 Every phase now has a first working version. "Tested here" means exercised end to end
 against libvirt's test driver, SQLite and real qemu-img; "needs your lab" means the code is
@@ -113,7 +113,11 @@ written against the documented tools but only real hardware can prove it.
 | Phase 5: HA, witness, DR | health checks, witness second opinion, Redfish fencing, HA restart, safe recovery, maintenance evacuation; DR plans with rbd-mirror test/planned/disaster and stretch mode | HA restart and recovery, witness | Redfish, rbd-mirror, stretch |
 | Phase 6: runbooks, FinOps, reports | YAML runbooks with retries/rollback/dry run, metering, costs, rightsizing, power via Redfish, 7 reports (CSV, HTML) | yes | BMC power readings |
 | Snapshots and immutable vault (0.4) | VM snapshots (RBD/qcow2, guest-agent quiesce), schedules with pruning, retention locks, VM-delete guard, S3 Object Lock COMPLIANCE copies, vault restore, coverage report | snapshots, locks, schedules on the test driver; vault copy, lock enforcement and point-in-time data against an S3 mock | Ceph RBD snapshots, a real MinIO/S3 bucket |
-| Installer | three .deb packages, ISO builder with node/controller/all-in-one/witness boot entries | packages install on Ubuntu 24.04; ISO layout | booting the real ISO |
+| Control plane on the nodes (0.5) | etcd lease election with terms as fencing tokens, step-down watchdog, virtual IP, Patroni PostgreSQL (synchronous), witness as third voter, cross-controller tasks | 3 controllers on a real etcd: leader kill, SIGTERM handover, freeze, etcd quorum loss; TLS etcd from `katam-cluster` certificates; whole-node loss with Patroni failover | VIP on real switches, Patroni across hosts |
+| PR/DR watch (0.5) | DR site fails over (or asks for approval) only when the witness confirms the primary is down | state machine and approval API | two real sites |
+| Grafana (0.5) | Prometheus `/metrics`, dashboard, alert rules, annotations | real Prometheus scraping a controller; every dashboard query evaluated; alert rules load | Grafana rendering |
+| GitOps runbooks (0.5) | Git sync (timer, webhook: GitHub, GitLab, Gitea), atomic apply, prune, read-only managed runbooks, `katamctl runbook lint/validate`, CI pipelines | against real git repositories; `pip install` of katamctl without libvirt | a hosted Git service |
+| Installer | three .deb packages, ISO builder with node/controller/all-in-one/witness boot entries | packages install on Ubuntu 24.04; ISO boots BIOS and UEFI | |
 
 ## Build order
 

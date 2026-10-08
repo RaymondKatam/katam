@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# katam-cluster: run the Katam control plane on the nodes themselves, with leader election.
+#
+# Every controller member runs etcd (leader election, Raft) and PostgreSQL managed by Patroni
+# (the database, replicated, with automatic primary failover). A witness runs etcd only, as a
+# tie-breaker vote: required for two-node clusters, optional otherwise.
+#
+#   On the first node:
+#     sudo katam-cluster init --members "hv1=172.20.10.11,hv2=172.20.10.12,hv3=172.20.10.13" \
+#          --vip 172.20.10.5/24 --iface br-mgmt
+#     (two nodes + witness:  --members "hv1=...,hv2=..." --witness "witness=172.20.40.5")
+#   It writes /root/katam-cluster-bundle.tar (certificates and passwords; keep it private).
+#   Copy the bundle to every member and the witness, then on each one:
+#     sudo katam-cluster join --bundle katam-cluster-bundle.tar --name hv1
+#     sudo katam-cluster join --bundle katam-cluster-bundle.tar --name witness   (on the witness)
+#   Run join on all members within a few minutes: etcd waits for a majority to form.
+#
+#   sudo katam-cluster status
+#
+# Ports (management network): etcd 2379/2380, PostgreSQL 5432, Patroni API 8008, Katam 8080.
+set -euo pipefail
+
+BUNDLE_OUT=/root/katam-cluster-bundle.tar
+CONF=/etc/katam/cluster
+PGVER=${PGVER:-16}
+die() { echo "katam-cluster: $*" >&2; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || die "run as root (sudo)"; }
+rand() { openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 32; }
+
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# ---------------------------------------------------------------------------- init
+cmd_init() {
+  local members="" witness="" vip="" iface="" out=$BUNDLE_OUT
+  while [[ $# -gt 0 ]]; do case $1 in
+    --members) members=$2; shift 2;; --witness) witness=$2; shift 2;;
+    --vip) vip=$2; shift 2;; --iface) iface=$2; shift 2;; --out) out=$2; shift 2;;
+    *) die "unknown option $1";; esac; done
+  [[ -n $members ]] || die "--members is required"
+  local n_members n_voters
+  n_members=$(tr ',' '\n' <<<"$members" | grep -c .)
+  n_voters=$(( n_members + $(tr ',' '\n' <<<"$witness" | grep -c . || true) ))
+  (( n_members >= 1 )) || die "need at least one member"
+  if (( n_members == 2 )) && [[ -z $witness ]]; then
+    die "two members can't keep a majority when one fails: add --witness name=ip"
+  fi
+  (( n_voters % 2 == 1 )) || echo "warning: $n_voters etcd voters; an odd number (3 or 5) tolerates the same failures with fewer machines" >&2
+  [[ -z $vip || -n $iface ]] || die "--vip needs --iface (the management interface, e.g. br-mgmt)"
+
+  local work; work=$(mktemp -d); trap 'rm -rf "$work"' RETURN
+  mkdir -p "$work/pki"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=Katam cluster CA" -keyout "$work/pki/ca.key" -out "$work/pki/ca.crt" 2>/dev/null
+  local all="$members${witness:+,$witness}" pair name ip
+  for pair in ${all//,/ }; do
+    name=${pair%%=*}; ip=${pair#*=}
+    [[ $name =~ ^[a-z0-9][a-z0-9-]*$ && $ip =~ ^[0-9.]+$ ]] || die "bad member '$pair' (want name=ipv4)"
+    cat > "$work/ext.cnf" <<EOF
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+subjectAltName=DNS:$name,IP:$ip,IP:127.0.0.1,DNS:localhost
+EOF
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=$name" \
+      -keyout "$work/pki/$name.key" -out "$work/$name.csr" 2>/dev/null
+    openssl x509 -req -in "$work/$name.csr" -CA "$work/pki/ca.crt" -CAkey "$work/pki/ca.key" \
+      -CAcreateserial -days 3650 -extfile "$work/ext.cnf" -out "$work/pki/$name.crt" 2>/dev/null
+  done
+  rm -f "$work/pki/ca.key" "$work/pki/ca.srl"     # nobody needs to sign more after init
+  cat > "$work/cluster.env" <<EOF
+MEMBERS="$members"
+WITNESS="$witness"
+VIP="$vip"
+VIP_IFACE="$iface"
+PG_SUPERUSER_PASSWORD="$(rand)"
+PG_REPLICATION_PASSWORD="$(rand)"
+PG_REWIND_PASSWORD="$(rand)"
+PG_KATAM_PASSWORD="$(rand)"
+KATAM_SECRET_KEY="$(openssl rand -hex 32)"
+EOF
+  tar -C "$work" -cf "$out" cluster.env pki
+  chmod 600 "$out"
+  echo "Wrote $out. Copy it to every member${witness:+ and the witness}, then run join on each."
+}
+
+# ---------------------------------------------------------------------------- join
+load_bundle() {
+  local bundle=$1
+  [[ -f $bundle ]] || die "bundle $bundle not found"
+  mkdir -p "$CONF"; chmod 750 "$CONF"
+  tar -C "$CONF" -xf "$bundle"
+  chmod -R go-rwx "$CONF"
+  # shellcheck disable=SC1091
+  . "$CONF/cluster.env"
+}
+
+ip_of() { local pair; for pair in ${MEMBERS//,/ } ${WITNESS//,/ }; do
+  [[ ${pair%%=*} == "$1" ]] && { echo "${pair#*=}"; return; }; done; }
+
+etcd_cluster() { local pair out=""; for pair in ${MEMBERS//,/ } ${WITNESS//,/ }; do
+  out+="${out:+,}${pair%%=*}=https://${pair#*=}:2380"; done; echo "$out"; }
+
+etcd_hosts() { local pair out="" sep=${1:-,}; for pair in ${MEMBERS//,/ } ${WITNESS//,/ }; do
+  out+="${out:+$sep}${pair#*=}:2379"; done; echo "$out"; }
+
+install_cert() {   # dest_dir owner name
+  install -d -m 750 -o "$2" -g "$2" "$1"
+  install -m 640 -o "$2" -g "$2" "$CONF/pki/ca.crt" "$1/ca.crt"
+  install -m 640 -o "$2" -g "$2" "$CONF/pki/$3.crt" "$1/member.crt"
+  install -m 600 -o "$2" -g "$2" "$CONF/pki/$3.key" "$1/member.key"
+}
+
+setup_etcd() {
+  local name=$1 ip=$2
+  command -v etcd >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q etcd-server etcd-client
+  systemctl stop etcd 2>/dev/null || true
+  install_cert /etc/etcd/pki etcd "$name"
+  cat > /etc/default/etcd <<EOF
+# Written by katam-cluster. Members: $(etcd_cluster)
+ETCD_NAME="$name"
+ETCD_DATA_DIR="/var/lib/etcd/katam"
+ETCD_LISTEN_PEER_URLS="https://$ip:2380"
+ETCD_LISTEN_CLIENT_URLS="https://$ip:2379,https://127.0.0.1:2379"
+ETCD_ADVERTISE_CLIENT_URLS="https://$ip:2379"
+ETCD_INITIAL_ADVERTISE_PEER_URLS="https://$ip:2380"
+ETCD_INITIAL_CLUSTER="$(etcd_cluster)"
+ETCD_INITIAL_CLUSTER_STATE="new"
+ETCD_INITIAL_CLUSTER_TOKEN="katam-$(sha256sum "$CONF/pki/ca.crt" | head -c 12)"
+ETCD_CERT_FILE="/etc/etcd/pki/member.crt"
+ETCD_KEY_FILE="/etc/etcd/pki/member.key"
+ETCD_TRUSTED_CA_FILE="/etc/etcd/pki/ca.crt"
+ETCD_CLIENT_CERT_AUTH="true"
+ETCD_PEER_CERT_FILE="/etc/etcd/pki/member.crt"
+ETCD_PEER_KEY_FILE="/etc/etcd/pki/member.key"
+ETCD_PEER_TRUSTED_CA_FILE="/etc/etcd/pki/ca.crt"
+ETCD_PEER_CLIENT_CERT_AUTH="true"
+ETCD_HEARTBEAT_INTERVAL="250"
+ETCD_ELECTION_TIMEOUT="2500"
+ETCD_AUTO_COMPACTION_RETENTION="1"
+EOF
+  install -d -o etcd -g etcd -m 700 /var/lib/etcd/katam
+  systemctl enable etcd >/dev/null 2>&1
+  systemctl restart etcd --no-block
+  echo "etcd started on $ip (waits for a majority of: $(etcd_cluster | sed 's/=https[^,]*//g'))"
+}
+
+render_patroni() {
+  local name=$1 ip=$2 pair hba=""
+  for pair in ${MEMBERS//,/ }; do      # only cluster members may connect over the network
+    hba+="    - host replication replicator ${pair#*=}/32 scram-sha-256"$'\n'
+    hba+="    - host all all ${pair#*=}/32 scram-sha-256"$'\n'
+  done
+  cat <<EOF
+# Written by katam-cluster. PostgreSQL $PGVER managed by Patroni; etcd decides the primary.
+scope: katam
+namespace: /patroni/
+name: $name
+restapi:
+  listen: $ip:8008
+  connect_address: $ip:8008
+etcd3:
+  hosts: [$(etcd_hosts ", ")]
+  protocol: https
+  cacert: /etc/patroni/pki/ca.crt
+  cert: /etc/patroni/pki/member.crt
+  key: /etc/patroni/pki/member.key
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true            # a commit waits for one replica: no data lost on failover
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        password_encryption: scram-sha-256
+  initdb: [{encoding: UTF8}, data-checksums]
+  post_bootstrap: /etc/patroni/katam-bootstrap.sh
+postgresql:
+  listen: "$ip,127.0.0.1:5432"
+  connect_address: $ip:5432
+  data_dir: /var/lib/postgresql/$PGVER/katam
+  bin_dir: /usr/lib/postgresql/$PGVER/bin
+  pgpass: /var/lib/postgresql/.pgpass_patroni
+  authentication:
+    superuser: {username: postgres, password: "$PG_SUPERUSER_PASSWORD"}
+    replication: {username: replicator, password: "$PG_REPLICATION_PASSWORD"}
+    rewind: {username: rewind, password: "$PG_REWIND_PASSWORD"}
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+  pg_hba:
+    - local all all peer
+    - host all all 127.0.0.1/32 scram-sha-256
+${hba%$'\n'}
+tags: {nofailover: false, noloadbalance: false, clonefrom: false, nosync: false}
+EOF
+}
+
+setup_patroni() {
+  local name=$1 ip=$2
+  command -v patroni >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q patroni "postgresql-$PGVER"
+  # Ubuntu creates and starts a default cluster on 5432; Patroni needs the port.
+  if pg_lsclusters -h 2>/dev/null | awk '{print $1" "$2}' | grep -qx "$PGVER main"; then
+    if [[ $(sudo -u postgres psql -Atc "select count(*) from pg_database where not datistemplate and datname<>'postgres'" 2>/dev/null || echo 0) != 0 ]]; then
+      die "the default PostgreSQL cluster ($PGVER/main) has databases; move them, then drop it with pg_dropcluster --stop $PGVER main"
+    fi
+    pg_dropcluster --stop "$PGVER" main
+  fi
+  install_cert /etc/patroni/pki postgres "$name"
+  render_patroni "$name" "$ip" > /etc/patroni/config.yml
+  cat > /etc/patroni/katam-bootstrap.sh <<EOF
+#!/bin/sh
+# Runs once, on the first primary: the database and login for Katam.
+set -e
+psql "\$1" -v ON_ERROR_STOP=1 <<SQL
+CREATE ROLE katam LOGIN PASSWORD '$PG_KATAM_PASSWORD';
+CREATE DATABASE katam OWNER katam;
+SQL
+EOF
+  chown postgres:postgres /etc/patroni/config.yml /etc/patroni/katam-bootstrap.sh
+  chmod 600 /etc/patroni/config.yml; chmod 700 /etc/patroni/katam-bootstrap.sh
+  install -d -o postgres -g postgres -m 700 "/var/lib/postgresql/$PGVER/katam"
+  systemctl enable patroni >/dev/null 2>&1
+  systemctl restart patroni --no-block
+  echo "Patroni started; the first member to reach etcd becomes the PostgreSQL primary"
+}
+
+setup_controller() {
+  local name=$1 ip=$2 hosts="" ports="" eps="" pair
+  for pair in ${MEMBERS//,/ }; do hosts+="${hosts:+,}${pair#*=}"; ports+="${ports:+,}5432"; done
+  for pair in ${MEMBERS//,/ } ${WITNESS//,/ }; do eps+="${eps:+, }https://${pair#*=}:2379"; done
+  install_cert /etc/katam/etcd katam "$name"
+  install -d -m 755 /usr/lib/katam
+  local cfg=/etc/katam/config.yaml
+  [[ -f $cfg ]] || die "$cfg not found: install katam-controller first"
+  python3 - "$cfg" "$name" "$ip" "$hosts" "$ports" "$eps" "$VIP" "$VIP_IFACE" "$PG_KATAM_PASSWORD" "$KATAM_SECRET_KEY" <<'PY'
+import sys, yaml
+cfg, name, ip, hosts, ports, eps, vip, iface, pw, secret = sys.argv[1:]
+with open(cfg) as f:
+    c = yaml.safe_load(f) or {}
+ctl = c.setdefault("controller", {})
+ctl["database_url"] = (f"postgresql://katam:{pw}@/katam?host={hosts}&port={ports}"
+                       "&target_session_attrs=read-write&connect_timeout=3")
+ctl["secret_key"] = secret            # same on every controller, so sessions work on any of them
+c["cluster"] = {"mode": "etcd", "member": name, "advertise_url": f"http://{ip}:{ctl.get('port', 8080)}",
+                "etcd": {"endpoints": [e.strip() for e in eps.split(",")], "lease_ttl_s": 10,
+                         "ca": "/etc/katam/etcd/ca.crt", "cert": "/etc/katam/etcd/member.crt",
+                         "key": "/etc/katam/etcd/member.key"},
+                "vip": {"address": vip or None, "interface": iface or None}}
+with open(cfg + ".new", "w") as f:
+    yaml.safe_dump(c, f, sort_keys=False)
+PY
+  cp -a "$cfg" "$cfg.before-cluster"
+  mv "$cfg.new" "$cfg"; chown root:katam "$cfg"; chmod 640 "$cfg"
+  echo "Updated $cfg (old copy: $cfg.before-cluster). Restart Katam once Patroni has a primary:"
+  echo "  sudo systemctl restart katam"
+}
+
+cmd_join() {
+  local bundle="" name="" role=""
+  while [[ $# -gt 0 ]]; do case $1 in
+    --bundle) bundle=$2; shift 2;; --name) name=$2; shift 2;; *) die "unknown option $1";; esac; done
+  [[ -n $bundle && -n $name ]] || die "join needs --bundle and --name"
+  load_bundle "$bundle"
+  local ip; ip=$(ip_of "$name"); [[ -n $ip ]] || die "$name isn't in the bundle's member list"
+  ip -o addr | grep -q " $ip/" || die "$ip isn't configured on this machine; is this $name?"
+  role=member; [[ ",$WITNESS," == *",$name=$ip,"* ]] && role=witness
+  setup_etcd "$name" "$ip"
+  if [[ $role == member ]]; then
+    setup_patroni "$name" "$ip"
+    if [[ -f /etc/katam/config.yaml ]]; then setup_controller "$name" "$ip"
+    else echo "katam-controller isn't installed here; install it, then run: katam-cluster join again"; fi
+  else
+    echo "$name is the witness: etcd tie-breaker only (keep it on separate power and network)"
+  fi
+}
+
+cmd_status() {
+  [[ -f $CONF/cluster.env ]] || die "not a cluster member (no $CONF/cluster.env)"
+  # shellcheck disable=SC1091
+  . "$CONF/cluster.env"
+  local me; me=$(grep -oP '^ETCD_NAME="\K[^"]+' /etc/default/etcd 2>/dev/null || true)
+  local pki=/etc/etcd/pki
+  echo "== etcd (leader election)"
+  ETCDCTL_API=3 etcdctl --endpoints="$(etcd_hosts , | sed 's/[^,]*/https:\/\/&/g')" \
+    --cacert=$pki/ca.crt --cert=$pki/member.crt --key=$pki/member.key endpoint status -w table 2>&1 || true
+  if command -v patronictl >/dev/null && [[ -f /etc/patroni/config.yml ]]; then
+    echo "== PostgreSQL (Patroni)"
+    sudo -u postgres patronictl -c /etc/patroni/config.yml list 2>&1 || true
+  fi
+  if [[ $me && -f /etc/katam/config.yaml ]]; then
+    echo "== Katam controllers"
+    curl -s "http://127.0.0.1:8080/healthz" || echo "katam isn't answering on this node"
+    echo
+  fi
+}
+
+case ${1:-} in
+  init) shift; need_root; cmd_init "$@";;
+  join) shift; need_root; cmd_join "$@";;
+  status) shift; need_root; cmd_status "$@";;
+  render-patroni) shift; . "${CONF_ENV:-$CONF/cluster.env}"; render_patroni "$@";;   # for tests
+  -h|--help|help|"") usage 0;;
+  *) usage 1;;
+esac

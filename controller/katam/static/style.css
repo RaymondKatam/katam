@@ -156,6 +156,14 @@ label.inline { display: inline-flex; align-items: center; gap: .5rem; font-weigh
 .update-banner { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin: 0 clamp(1rem, 4vw, 2.5rem) 1rem;
   padding: .6rem 1rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--panel); }
 .update-banner a { color: var(--accent); }
+.pill { font-size: .8rem; padding: .2rem .6rem; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); }
+.pill.warn { border-color: var(--bad); color: var(--bad); }
+.linkbtn { text-decoration: none; color: var(--accent); }
+.status-strip { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 0 0 1rem;
+  padding: .6rem 1rem; border: 1px solid var(--line); border-left: 4px solid var(--run); border-radius: 6px; background: var(--panel); }
+.status-strip.warn { border-left-color: var(--pause); }
+.status-strip.bad { border-left-color: var(--bad); }
+.status-strip code { font-size: .85rem; }
 .tabs { display: flex; gap: .25rem; padding: 0 clamp(1rem, 4vw, 2.5rem); border-bottom: 1px solid var(--line);
   overflow-x: auto; margin-bottom: 1.5rem; }
 .tabs button { border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none; padding: .7rem .9rem;

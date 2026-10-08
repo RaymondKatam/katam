@@ -39,7 +39,7 @@
   <div class="card dl">
     <div>
       <strong id="ver">Latest release</strong>
-      <div class="meta" id="rel">Installer ISO for BIOS and UEFI servers, about 600 MB. Installs offline.</div>
+      <div class="meta" id="rel">Installer ISO for BIOS and UEFI servers, about 650 MB. Installs offline.</div>
     </div>
     <a class="btn" id="iso" href="https://github.com/RaymondKatam/katam/releases/latest">Download ISO</a>
   </div>
@@ -102,7 +102,7 @@ katam.hostname=hv1 katam.password=Change-Me-Now</pre>
     const r = (f.channels && f.channels.stable || [])[0];
     if (!r) return;
     document.getElementById("ver").textContent = `Katam Virtualization ${r.version}`;
-    document.getElementById("rel").textContent = `Released ${r.released}. Installer ISO for BIOS and UEFI servers, about 600 MB. Installs offline.`;
+    document.getElementById("rel").textContent = `Released ${r.released}. Installer ISO for BIOS and UEFI servers, about 650 MB. Installs offline.`;
     if (r.iso) document.getElementById("iso").href = r.iso;
     if (r.sha256) document.getElementById("sha").textContent = r.sha256;
     if (r.notes) document.getElementById("notes").href = r.notes;

@@ -224,10 +224,14 @@ class Protection:
             except Exception as e:  # noqa: BLE001
                 log.warning("prune of %s failed: %s", r["id"], e)
 
+    gate = staticmethod(lambda: True)                  # leader-only when several controllers run
+
     def start(self):
         def loop():
             while True:
                 time.sleep(float(self.p["scheduler_interval_s"]))
+                if not self.gate():
+                    continue
                 try:
                     self.tick()
                 except Exception:  # noqa: BLE001

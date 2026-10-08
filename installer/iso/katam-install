@@ -216,11 +216,15 @@ if [[ $MODE == net ]]; then
     lvm2 mdadm ipmitool smartmontools nvme-cli jq"
   NODEPKG="qemu-system-x86 qemu-utils qemu-block-extra ipxe-qemu seabios ovmf swtpm swtpm-tools
     libvirt-daemon-system libvirt-clients tuned cpu-checker ufw uuid-runtime xorriso ceph-common cephadm podman
-    openvswitch-switch ovn-host ovn-central"
+    openvswitch-switch ovn-host ovn-central etcd-server etcd-client patroni postgresql postgresql-client
+    iputils-arping git"
   case $ROLE in node|allinone) EXTRA=$NODEPKG ;; *) EXTRA="" ;; esac
   ALLPKG=$(echo $BASEPKG $EXTRA)   # one line: the list spans several lines above
+  mkdir -p $T/etc/postgresql-common/createcluster.d   # no default database; katam-cluster sets one up
+  echo 'create_main_cluster = false' > $T/etc/postgresql-common/createcluster.d/katam.conf
   chroot $T bash -c "export DEBIAN_FRONTEND=noninteractive LANG=C; apt-get update -q && \
     apt-get install -y -q --no-install-recommends $ALLPKG && locale-gen en_US.UTF-8 && apt-get clean" >>"$LOG" 2>&1 || exit 22
+  chroot $T systemctl disable etcd >/dev/null 2>&1 || true    # katam-cluster enables it
   gauge 65 "Packages installed"
 fi
 cat > $T/etc/fstab <<EOF

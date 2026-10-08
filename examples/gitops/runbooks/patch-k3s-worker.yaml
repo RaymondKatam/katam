@@ -1,0 +1,20 @@
+name: patch-k3s-worker
+description: Patch one K3s worker in the guest, reboot, and wait for kubelet
+params:
+  vm: {required: true}
+  host: {required: true}
+steps:
+  - name: apt-upgrade
+    action: guest.exec
+    args: {vm: "${params.vm}", command: "apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get -y upgrade", timeout: 1800}
+  - name: reboot
+    action: vm.power
+    args: {vm: "${params.vm}", action: reboot}
+  - name: settle
+    action: sleep
+    args: {seconds: 30}
+  - name: kubelet-port
+    action: tcp.check
+    args: {host: "${params.host}", port: 10250}
+    retries: 20
+    retry_delay: 6

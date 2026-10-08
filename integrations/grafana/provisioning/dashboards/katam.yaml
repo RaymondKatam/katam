@@ -1,0 +1,11 @@
+# Copy to /etc/grafana/provisioning/dashboards/ and katam-overview.json to
+# /var/lib/grafana/dashboards/katam/. Grafana loads it at start-up and keeps it updated.
+apiVersion: 1
+providers:
+  - name: katam
+    folder: Katam
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards/katam

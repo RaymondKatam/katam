@@ -8,6 +8,14 @@
   katamctl image import ubuntu-2404 --url https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
   katamctl runbook run restart-with-health-check -p vm=web-01 -p host=172.20.20.51
   katamctl report cost --days 30 --format csv > cost.csv
+
+  katamctl cluster                 # controllers, leader, term, etcd health
+  katamctl cluster step-down       # hand leadership to another controller
+
+GitOps and CI (lint needs no server or token):
+  katamctl runbook lint runbooks/              # validate every *.yaml offline
+  katamctl runbook validate runbooks/x.yaml    # validate against the live cluster
+  katamctl gitops sync --wait                  # pull the runbook repo now
 """
 import argparse
 import json
@@ -16,6 +24,40 @@ import sys
 import time
 
 import requests
+
+
+def lint(paths):
+    """Offline checks, the same parser the controller uses. Exit 1 on any problem."""
+    import glob
+    try:
+        from katam import runbooks
+    except ImportError:
+        sys.exit("katamctl lint needs the katam package (pip install ./controller)")
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            files += sorted(glob.glob(os.path.join(p, "**", "*.y*ml"), recursive=True))
+        else:
+            files.append(p)
+    names, bad = {}, 0
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                rb = runbooks.parse(fh.read())
+            if not runbooks.NAME_RE.match(rb["name"]):
+                raise runbooks.RunbookError(f"name {rb['name']!r} must be lowercase letters, digits and dashes")
+            if rb["name"] in names:
+                raise runbooks.RunbookError(f"name {rb['name']!r} is also used by {names[rb['name']]}")
+            names[rb["name"]] = f
+            print(f"ok    {f}  ({rb['name']}, {len(rb['steps'])} steps)")
+        except (runbooks.RunbookError, OSError) as e:
+            bad += 1
+            print(f"FAIL  {f}: {e}")
+    if not files:
+        sys.exit("No runbook files found")
+    print(f"{len(files) - bad} valid, {bad} failed")
+    if bad:
+        sys.exit(1)
 
 
 class Client:
@@ -79,10 +121,17 @@ def main():
     q.add_argument("--no-cloud-init", action="store_true"); q.add_argument("--v2v", action="store_true"); q.add_argument("--wait", action="store_true")
     p = sub.add_parser("runbook"); rsub = p.add_subparsers(dest="rcmd", required=True)
     q = rsub.add_parser("push"); q.add_argument("-f", required=True)
+    q = rsub.add_parser("lint"); q.add_argument("paths", nargs="+")
+    q = rsub.add_parser("validate"); q.add_argument("file"); q.add_argument("-p", action="append", default=[])
     q = rsub.add_parser("run"); q.add_argument("name"); q.add_argument("-p", action="append", default=[]); q.add_argument("--dry-run", action="store_true"); q.add_argument("--wait", action="store_true")
     p = sub.add_parser("report"); p.add_argument("name"); p.add_argument("--days", type=float, default=30); p.add_argument("--format", default="csv")
     p = sub.add_parser("dr"); p.add_argument("plan"); p.add_argument("mode", choices=["test", "cleanup-test", "planned", "disaster"]); p.add_argument("--wait", action="store_true")
+    p = sub.add_parser("cluster"); p.add_argument("action", nargs="?", choices=["status", "step-down"], default="status")
+    p = sub.add_parser("gitops"); p.add_argument("action", choices=["status", "sync"]); p.add_argument("--wait", action="store_true")
+    p = sub.add_parser("dr-watch"); p.add_argument("action", choices=["status", "approve", "reset"]); p.add_argument("--wait", action="store_true")
     a = ap.parse_args()
+    if a.cmd == "runbook" and a.rcmd == "lint":
+        return lint(a.paths)
     c = Client()
 
     def done(resp):
@@ -146,6 +195,13 @@ def main():
                 src = f.read()
             name = yaml.safe_load(src)["name"]
             print(c.call("PUT", f"/runbooks/{name}", json={"source": src}))
+        elif a.rcmd == "validate":
+            with open(a.file) as f:
+                src = f.read()
+            body = {"source": src}
+            if a.p:
+                body["params"] = dict(x.split("=", 1) for x in a.p)
+            print(json.dumps(c.call("POST", "/runbooks/validate", json=body), indent=2))
         else:
             params = dict(x.split("=", 1) for x in a.p)
             r = c.call("POST", f"/runbooks/{a.name}/run", json={"params": params, "dry_run": a.dry_run})
@@ -163,6 +219,31 @@ def main():
                 sys.exit("Not confirmed")
             body["confirm"] = a.plan
         done(c.call("POST", f"/dr/plans/{a.plan}/run", json=body))
+    elif a.cmd == "cluster":
+        if a.action == "step-down":
+            print(json.dumps(c.call("POST", "/cluster/step-down"), indent=2))
+        else:
+            info = c.call("GET", "/cluster")
+            print(f"mode {info['mode']}   leader {info.get('leader')}   term {info.get('term')}")
+            table([{**m, "leader": "*" if m["member"] == info.get("leader") else ""} for m in info.get("members", [])],
+                  ["member", "leader", "url", "version"])
+            for e in info.get("etcd") or []:
+                print(f"etcd {e['endpoint']}: {'healthy' if e['healthy'] else 'DOWN'}")
+    elif a.cmd == "gitops":
+        if a.action == "sync":
+            done(c.call("POST", "/gitops/sync"))
+        else:
+            print(json.dumps(c.call("GET", "/gitops"), indent=2))
+    elif a.cmd == "dr-watch":
+        if a.action == "approve":
+            st = c.call("GET", "/dr/watch")
+            if input(f"Type the plan name ({st.get('plan')}) to fail over to this site: ") != st.get("plan"):
+                sys.exit("Not confirmed")
+            done(c.call("POST", "/dr/watch/approve", json={"confirm": st.get("plan")}))
+        elif a.action == "reset":
+            print(json.dumps(c.call("POST", "/dr/watch/reset"), indent=2))
+        else:
+            print(json.dumps(c.call("GET", "/dr/watch"), indent=2))
 
 
 if __name__ == "__main__":

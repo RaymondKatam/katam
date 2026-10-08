@@ -19,12 +19,15 @@ from flask import (Flask, Response, g, jsonify, redirect, request, send_from_dir
 from . import __version__, finops, reports, runbooks
 from .config import load_config
 from .db import (DB, audit, bindings, delete, dr_plans, group_members, groups, images, insert,
-                 projects, protection_policies, security_groups, select, templates, tokens, update,
-                 users)
+                 projects, protection_policies, runbook_origins, security_groups, select, templates,
+                 tokens, update, users)
 from .db import runbooks as runbooks_t
 from .driver import Cluster, ClusterError
+from .gitops import GitError, GitOps, pushed_branch, verify_signature
 from .iam import IAM, ROLES, AuthError, Forbidden, saml_request_data, saml_settings
 from .images import EXPORT_FORMATS, ImageService, staging_path
+from .leader import Leadership, NotLeader
+from .metrics import GrafanaAnnotator, Metrics
 from .nodeexec import ExecError, NodeExec
 from .tasks import Busy, Tasks
 
@@ -58,10 +61,13 @@ def create_app(cfg_path=None, start_background=True):
         os.makedirs(cfg["controller"][d], exist_ok=True)
 
     db = DB(cfg["controller"]["database_url"])
+    lead = Leadership(cfg, db)
+    grafana = GrafanaAnnotator(cfg)
+    db.listeners.append(grafana)
     iam = IAM(db, cfg)
     iam.bootstrap()
     cluster = Cluster(cfg)
-    tasks = Tasks(db)
+    tasks = Tasks(db, member=lead.member if lead.mode != "single" else None)
     nexec = NodeExec(cfg)
     imgs = ImageService(cfg, db, cluster, nexec)
 
@@ -80,6 +86,16 @@ def create_app(cfg_path=None, start_background=True):
     protection = Protection(cfg, db, cluster, nexec, tasks, imgs)
     from .updates import Updates
     updates = Updates(cfg, ha, nexec)
+    gitops = GitOps(cfg, db)
+    from .drwatch import DRWatch
+    drwatch = DRWatch(cfg, db, dr, tasks)
+    metrics = Metrics(cfg, db, cluster, ha, lead, protection, updates)
+    # Cluster-wide loops run everywhere but only act on the leader; irreversible steps re-check
+    # leadership with etcd right before they happen (fencing token = election term).
+    for svc in (ha, metering, protection, gitops, drwatch):
+        svc.gate = lead.is_leader
+    ha.guard = lead.ensure
+    drwatch.guard = lead.ensure
 
     here = os.path.dirname(__file__)
     app = Flask(__name__, static_folder=os.path.join(here, "static"), static_url_path="/static")
@@ -90,35 +106,55 @@ def create_app(cfg_path=None, start_background=True):
                       MAX_CONTENT_LENGTH=200 * 2**30)
     app.katam = {"cfg": cfg, "db": db, "iam": iam, "cluster": cluster, "tasks": tasks, "imgs": imgs,
                  "sdn": sdn, "dr": dr, "metering": metering, "ha": ha, "nexec": nexec,
-                 "protection": protection, "updates": updates}
+                 "protection": protection, "updates": updates, "leader": lead, "gitops": gitops,
+                 "drwatch": drwatch, "metrics": metrics, "grafana": grafana}
 
-    # ---- background services (single leader when several controllers share Postgres) --
-    def start_services():
+    # ---- background services ------------------------------------------------------
+    def on_elected():
         if sdn:
             try:
                 sdn.sync()
             except Exception as e:  # noqa: BLE001
                 log.error("SDN sync failed: %s", e)
+
+    def housekeeping():
+        while True:
+            time.sleep(30)
+            if lead.mode != "single" and lead.is_leader():
+                try:
+                    live = lead.members()
+                    if live:
+                        n = tasks.reap_orphans(live)
+                        if n:
+                            log.warning("marked %d task(s) from stopped controllers as failed", n)
+                except Exception:  # noqa: BLE001
+                    log.exception("housekeeping failed")
+
+    if start_background:
         metering.start()
         ha.start()
         protection.start()
+        gitops.start()
+        drwatch.start()
+        lead.on_elected(on_elected)
+        lead.start()
+        threading.Thread(target=housekeeping, name="katam-housekeeping", daemon=True).start()
+        if lead.mode != "single":
+            import atexit
+            import signal
+            atexit.register(lead.stop)
+            try:
+                prev = signal.getsignal(signal.SIGTERM)
 
-    if start_background:
-        if db.engine.dialect.name == "postgresql":
-            def leader():
-                conn = db.engine.raw_connection()
-                cur = conn.cursor()
-                while True:
-                    cur.execute("SELECT pg_try_advisory_lock(424242)")
-                    if cur.fetchone()[0]:
-                        log.info("this controller is the leader")
-                        start_services()
-                        while True:
-                            time.sleep(3600)
-                    time.sleep(10)
-            threading.Thread(target=leader, daemon=True).start()
-        else:
-            start_services()
+                def on_term(signum, frame):
+                    lead.stop()               # hand over at once instead of waiting for the lease
+                    if callable(prev):
+                        prev(signum, frame)
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    os.kill(os.getpid(), signal.SIGTERM)   # then exit the normal way
+                signal.signal(signal.SIGTERM, on_term)
+            except ValueError:                # not the main thread (tests)
+                pass
 
     # ---- errors -----------------------------------------------------------
     @app.errorhandler(BadRequest)
@@ -148,6 +184,15 @@ def create_app(cfg_path=None, start_background=True):
     def e409(e):
         return jsonify(error=str(e)), 409
 
+    @app.errorhandler(NotLeader)
+    def e409l(e):
+        info = lead.info()
+        return jsonify(error=str(e), leader=info.get("leader"), leader_url=info.get("leader_url")), 409
+
+    @app.errorhandler(GitError)
+    def e502g(e):
+        return jsonify(error=str(e)), 502
+
     @app.errorhandler(libvirt.libvirtError)
     def e502(e):
         return jsonify(error=e.get_error_message()), 502
@@ -162,8 +207,9 @@ def create_app(cfg_path=None, start_background=True):
         g.p = None
         path = request.path
         if path.startswith("/static/") or path in ("/", "/login", "/auth/login", "/auth/config",
-                                                   "/healthz") or path.startswith("/auth/saml/"):
-            return
+                                                   "/healthz", "/metrics", "/api/v1/hooks/git") \
+                or path.startswith("/auth/saml/"):
+            return                            # /metrics and the Git webhook check their own credentials
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer katam_"):
             g.p = iam.token_principal(auth[7:])
@@ -195,7 +241,46 @@ def create_app(cfg_path=None, start_background=True):
 
     @app.get("/healthz")
     def healthz():
-        return jsonify(ok=True, version=__version__)
+        """Load balancers and keepalived can route on role: /healthz?leader=1 is 503 on followers."""
+        role = "leader" if lead.is_leader() else "follower"
+        body = dict(ok=True, version=__version__, member=lead.member, role=role,
+                    leader=(lead.current or {}).get("member"))
+        if request.args.get("leader") == "1" and role != "leader":
+            return jsonify(body), 503
+        return jsonify(body)
+
+    @app.get("/metrics")
+    def prom_metrics():
+        if not metrics.allowed(request.remote_addr, request.headers.get("Authorization", "")):
+            return Response("Forbidden: set metrics.token or add the scraper to metrics.allow\n", 403,
+                            mimetype="text/plain")
+        return Response(metrics.render(), mimetype="text/plain; version=0.0.4")
+
+    # ---- control-plane cluster --------------------------------------------------------
+    @app.get("/api/v1/cluster")
+    def cluster_info():
+        if not visible("vm.read"):
+            raise Forbidden("No access")
+        return jsonify(lead.info())
+
+    @app.post("/api/v1/cluster/step-down")
+    def cluster_step_down():
+        need("iam.admin")
+        lead.resign()
+        db.audit(actor(), "leader.step_down", lead.member)
+        return jsonify(ok=True, member=lead.member)
+
+    @app.get("/api/v1/integrations")
+    def integrations():
+        if not visible("vm.read"):
+            raise Forbidden("No access")
+        g = cfg["grafana"]
+        url = (g.get("url") or "").rstrip("/")
+        return jsonify(grafana={"url": url or None, "annotations": grafana.enabled,
+                                "dashboard_url": f"{url}/d/{g.get('dashboard_uid')}" if url else None},
+                       metrics={"enabled": cfg["metrics"].get("enabled", True), "path": "/metrics",
+                                "token_required": bool(cfg["metrics"].get("token"))},
+                       gitops=gitops.status() if visible("runbook.read") else None)
 
     @app.get("/auth/config")
     def auth_config():
@@ -868,7 +953,72 @@ def create_app(cfg_path=None, start_background=True):
     def rb_list():
         if not visible("runbook.read"):
             raise Forbidden("No access")
-        return jsonify(db.all(select(runbooks_t)))
+        origins = {r["name"]: r for r in db.all(select(runbook_origins))}
+        out = []
+        for r in db.all(select(runbooks_t)):
+            o = origins.get(r["name"])
+            out.append({**r, "managed_by": o["origin"] if o else None, "commit": o["commit"] if o else None,
+                        "path": o["path"] if o else None})
+        return jsonify(out)
+
+    def not_git_managed(name):
+        o = gitops.managed(name)
+        if o:
+            raise Busy(f"Runbook {name} is managed in Git ({o['path']} at {o['commit'][:10]}); "
+                       "change it with a commit to the repository")
+
+    @app.post("/api/v1/runbooks/validate")
+    def rb_validate():
+        """For CI: check a runbook against this cluster without saving it."""
+        if not visible("runbook.read"):
+            raise Forbidden("No access")
+        src = request.get_json()["source"] if request.is_json else request.get_data(as_text=True)
+        rb = runbooks.parse(src)
+        if not NAME_RE.match(rb["name"]):
+            raise BadRequest("Runbook names are lowercase letters, digits and dashes")
+        params = (request.get_json(silent=True) or {}).get("params") if request.is_json else None
+        plan = None
+        if params is not None:
+            plan = runbooks.Runner(hooks(g.p.name)).plan(rb, params)
+        return jsonify(ok=True, name=rb["name"], steps=len(rb["steps"]), plan=plan,
+                       managed_by="git" if gitops.managed(rb["name"]) else None)
+
+    # ---- GitOps -----------------------------------------------------------------------
+    @app.get("/api/v1/gitops")
+    def gitops_status():
+        if not visible("runbook.read"):
+            raise Forbidden("No access")
+        return jsonify(gitops.status())
+
+    @app.post("/api/v1/gitops/sync")
+    def gitops_sync():
+        need("iam.admin")
+        if not gitops.enabled:
+            raise BadRequest("Set runbooks.git.url in config.yaml first")
+        who = actor()
+        tid = tasks.submit("runbook.sync", "gitops:runbooks", lambda p: gitops.sync(p, actor=who)["commit"], who)
+        return jsonify(task=tid), 202
+
+    @app.post("/api/v1/hooks/git")
+    def git_webhook():
+        """Push webhook from GitHub, GitLab, Gitea or Forgejo (signed with runbooks.git.webhook_secret)."""
+        body = request.get_data()
+        if not gitops.enabled or not verify_signature(gitops.g.get("webhook_secret"), body, request.headers):
+            return jsonify(error="Bad or missing webhook signature"), 401
+        event = request.headers.get("X-GitHub-Event") or request.headers.get("X-Gitea-Event") or \
+            request.headers.get("X-Gitlab-Event") or ""
+        if event.lower() in ("ping",):
+            return jsonify(ok=True, pong=True)
+        payload = request.get_json(silent=True) or {}
+        branch = pushed_branch(payload)
+        if branch and branch != (gitops.g.get("branch") or "main"):
+            return jsonify(ok=True, ignored=f"push to {branch}"), 202
+        try:
+            tid = tasks.submit("runbook.sync", "gitops:runbooks",
+                               lambda p: gitops.sync(p, actor="git-webhook")["commit"], "git-webhook")
+        except Busy:
+            return jsonify(ok=True, queued=False, note="A sync is already running"), 202
+        return jsonify(ok=True, task=tid), 202
 
     @app.get("/api/v1/runbooks/examples")
     def rb_examples():
@@ -877,6 +1027,7 @@ def create_app(cfg_path=None, start_background=True):
     @app.put("/api/v1/runbooks/<name>")
     def rb_put(name):
         need("iam.admin")
+        not_git_managed(name)
         src = request.get_data(as_text=True)
         if request.is_json:
             src = request.get_json()["source"]
@@ -894,6 +1045,7 @@ def create_app(cfg_path=None, start_background=True):
     @app.delete("/api/v1/runbooks/<name>")
     def rb_delete(name):
         need("iam.admin")
+        not_git_managed(name)
         db.run(delete(runbooks_t).where(runbooks_t.c.name == name))
         return jsonify(ok=True)
 
@@ -910,7 +1062,11 @@ def create_app(cfg_path=None, start_background=True):
         if b.get("dry_run"):
             return jsonify(plan=runbooks.Runner(hooks(p_obj.name)).plan(rb, b.get("params")))
 
+        origin = gitops.managed(name)
+
         def go(progress):
+            if origin:
+                progress(f"Runbook from Git: {origin['path']} at commit {origin['commit'][:10]}")
             # Runbook steps run in a worker thread; carry the caller's identity into it.
             with app.test_request_context():
                 g.p = p_obj
@@ -919,6 +1075,26 @@ def create_app(cfg_path=None, start_background=True):
         return jsonify(task=tid), 202
 
     # ---- DR ----------------------------------------------------------------
+    @app.get("/api/v1/dr/watch")
+    def dr_watch_status():
+        if not visible("dr.read"):
+            raise Forbidden("No access")
+        return jsonify(drwatch.status())
+
+    @app.post("/api/v1/dr/watch/approve")
+    def dr_watch_approve():
+        need("iam.admin")
+        b = request.get_json(force=True) or {}
+        if b.get("confirm") != drwatch.w.get("plan"):
+            raise BadRequest(f"Type the plan name ({drwatch.w.get('plan')}) in confirm to start the failover")
+        return jsonify(task=drwatch.approve(actor())), 202
+
+    @app.post("/api/v1/dr/watch/reset")
+    def dr_watch_reset():
+        need("iam.admin")
+        drwatch.reset(actor())
+        return jsonify(drwatch.status())
+
     @app.get("/api/v1/dr/plans")
     def dr_list():
         if not visible("dr.read"):

@@ -69,6 +69,19 @@ Set up the bond and VLANs with the netplan examples in `/usr/share/katam-node/` 
 
 Import a cloud image (Images and templates > Import, e.g. the Ubuntu 24.04 cloud image URL), make a template, and create your first VM. The full guide covers Active Directory and SAML sign-in, GPUs, SDN and security groups, HA and the witness, DR, runbooks, costs and reports, and moving VMs to VMware or Hyper-V.
 
+## No separate controller: leader election (0.5)
+
+Instead of one controller VM, run the controller on every node: the nodes elect a leader through
+etcd, share a replicated PostgreSQL, and a virtual IP follows the leader. Two-node clusters add
+a witness as the tie-breaker. Setup is three commands (`katam-cluster init`, copy the bundle,
+`katam-cluster join` on each node); see [CLUSTER.md](CLUSTER.md).
+
+## Grafana and runbooks in Git (0.5)
+
+Prometheus scrapes `/metrics`; import the bundled Grafana dashboard
+([MONITORING.md](MONITORING.md)). Keep runbooks in a Git repository with CI checks and a push
+webhook ([examples/gitops](../examples/gitops/README.md)).
+
 ## Snapshots and immutable backups
 
 Take snapshots from a VM's **Snapshots** button or on a schedule (Protection tab). Locked

@@ -12,7 +12,7 @@
 # Output: installer/katam-virtualization-0.4.0-amd64.iso (BIOS and UEFI, CD/DVD and USB).
 set -euo pipefail
 
-VER=${VER:-0.4.0}
+VER=${VER:-0.5.0}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 WORK=${WORK:-$HERE/build}
@@ -33,6 +33,8 @@ PKGS=(
   qemu-system-x86 qemu-utils qemu-block-extra ipxe-qemu seabios ovmf swtpm swtpm-tools
   libvirt-daemon-system libvirt-clients tuned cpu-checker ufw uuid-runtime xorriso
   ceph-common cephadm podman openvswitch-switch ovn-host ovn-central
+  # control plane on the nodes: leader election, replicated database, virtual IP
+  etcd-server etcd-client patroni postgresql postgresql-client iputils-arping git
   # controller
   python3-flask python3-waitress python3-yaml python3-sqlalchemy python3-libvirt python3-pycdlib
   python3-ldap3 python3-onelogin-saml2 python3-requests python3-boto3 python3-lxml python3-xmlsec python3-psycopg2
@@ -74,6 +76,10 @@ PROXY=${http_proxy:-${HTTP_PROXY:-}}
 if [[ -n $PROXY ]]; then
   printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' "$PROXY" "${https_proxy:-${HTTPS_PROXY:-$PROXY}}" > "$C/etc/apt/apt.conf.d/99build-proxy"
 fi
+# PostgreSQL and etcd stay idle until katam-cluster configures them: no default database
+# cluster on port 5432 and no stand-alone etcd on an installed single server.
+mkdir -p "$C/etc/postgresql-common/createcluster.d"
+echo 'create_main_cluster = false' > "$C/etc/postgresql-common/createcluster.d/katam.conf"
 chroot "$C" bash -c "set -e; export DEBIAN_FRONTEND=noninteractive LANG=C
   apt-get update -q
   apt-get -y -q dist-upgrade
@@ -137,6 +143,7 @@ rm -f "$C"/etc/ssh/ssh_host_* "$C/usr/sbin/policy-rc.d"
 : > "$C/etc/machine-id"
 chroot "$C" systemctl enable ssh systemd-networkd >/dev/null 2>&1 || true
 chroot "$C" systemctl disable apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+chroot "$C" systemctl disable etcd >/dev/null 2>&1 || true   # katam-cluster enables it
 "$HERE/slim-image.sh" "$C"     # server firmware only; keeps the ISO a single ~600 MB file
 chroot "$C" update-initramfs -u -k all
 

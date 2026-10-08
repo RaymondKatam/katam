@@ -1,4 +1,4 @@
-# /etc/katam/config.yaml  (Katam Virtualization 0.3)
+# /etc/katam/config.yaml  (Katam Virtualization 0.5)
 # After editing: sudo systemctl restart katam
 
 controller:
@@ -8,7 +8,7 @@ controller:
   secret_key: REPLACE_WITH_openssl_rand_hex_32  # signs sessions; keep it secret
   novnc_url: https://katam.example.com:6080
   database_url: sqlite:////var/lib/katam/katam.db
-  # Several controllers for HA: point them at one Postgres; one becomes leader automatically.
+  # Several controllers: run katam-cluster (etcd + Patroni); it fills in database_url and cluster.
   # database_url: postgresql://katam:PASSWORD@172.20.10.20/katam
   bootstrap_admin: {user: admin, password: CHANGE-ME-on-first-login}
 
@@ -139,3 +139,52 @@ dr:
       storage:
         rbd: {monitors: [10.1.30.11, 10.1.30.12, 10.1.30.13], secret_uuid: 11111111-1111-1111-1111-111111111111}
 # DR-site nodes go under nodes: with site: dr
+  # PR/DR watch (set on the DR site's controllers): fail over only when this site AND the witness
+  # both can't reach the primary. approve: true waits for an admin to click Approve failover.
+  watch:
+    enabled: false
+    plan: core-services          # DR plan to run in disaster mode
+    primary_host: 172.20.10.5    # the primary site's controller address (its virtual IP)
+    primary_port: 8080
+    witness_url: http://172.20.50.5:8443
+    witness_token: REPLACE_WITH_RANDOM
+    after_s: 120                 # how long the primary must be down before acting
+    approve: true
+
+# Where the control plane runs. single (default): one controller. etcd: a controller on every
+# node; they elect a leader through etcd and share a Patroni-replicated PostgreSQL.
+# katam-cluster join writes this section for you.
+cluster:
+  mode: single
+  # member: hv1
+  # advertise_url: http://172.20.10.11:8080
+  # etcd:
+  #   endpoints: [https://172.20.10.11:2379, https://172.20.10.12:2379, https://172.20.10.13:2379]
+  #   lease_ttl_s: 10            # a new leader takes over about 10-20 s after the old one dies
+  #   ca: /etc/katam/etcd/ca.crt
+  #   cert: /etc/katam/etcd/member.crt
+  #   key: /etc/katam/etcd/member.key
+  # vip: {address: 172.20.10.5/24, interface: br-mgmt}   # follows the leader; users browse here
+
+# Prometheus scrapes /metrics; the Grafana dashboard is in /usr/share/katam/integrations/grafana.
+metrics:
+  enabled: true
+  token: null                    # set one (openssl rand -hex 24) and give it to Prometheus
+  allow: [127.0.0.1/32]          # addresses that may scrape without the token
+
+# Optional: send events (failover, leader change, upgrades, runbook runs) to Grafana as annotations.
+grafana:
+  url: null                      # e.g. https://grafana.example.com
+  token: null                    # Grafana service account token with the Annotations:write permission
+  dashboard_uid: katam-overview
+
+# Runbooks kept in Git (GitOps). See /usr/share/katam/examples/gitops/README.md.
+runbooks:
+  git:
+    url: null                    # e.g. git@github.com:your-org/katam-runbooks.git
+    branch: main
+    path: runbooks
+    interval_s: 300
+    webhook_secret: null         # webhook: POST https://<katam>/api/v1/hooks/git
+    ssh_key: null                # read-only deploy key, e.g. /var/lib/katam/.ssh/runbooks_deploy
+    prune: true

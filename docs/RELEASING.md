@@ -23,8 +23,8 @@ the packages and ISO, publishes a GitHub Release, and updates the signed apt rep
 
 ```bash
 # update release/notes.md with what changed, commit, then:
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.5.1
+git push origin v0.5.1
 ```
 
 The workflow runs for about 30-60 minutes. Tags with a suffix (`v0.4.0-beta1`) publish to the

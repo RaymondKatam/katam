@@ -16,6 +16,11 @@ log = logging.getLogger("katam.ha")
 
 
 class HAMonitor:
+    # Set by the app when several controllers run: only the leader watches and fences, and
+    # guard() re-checks leadership with etcd right before anything irreversible.
+    gate = staticmethod(lambda: True)
+    guard = staticmethod(lambda action: None)
+
     def __init__(self, cfg, db, cluster, tasks):
         self.cfg, self.db, self.cluster, self.tasks = cfg, db, cluster, tasks
         self.h = cfg["ha"]
@@ -46,6 +51,9 @@ class HAMonitor:
     def _loop(self):
         while True:
             time.sleep(float(self.h["interval_s"]))
+            if not self.gate():
+                self.fail.clear()             # a new leader starts counting from zero
+                continue
             try:
                 self.tick()
             except Exception:  # noqa: BLE001
@@ -111,6 +119,7 @@ class HAMonitor:
             self._set(node, "suspect", "No BMC configured; confirm the node is off, then use Confirm down.")
             return
         try:
+            self.guard(f"fencing {node}")
             self.fence(node)
         except Exception as e:  # noqa: BLE001
             self._set(node, "suspect", f"Fencing failed: {e}. Not restarting VMs.")
@@ -141,6 +150,7 @@ class HAMonitor:
         started, skipped = [], []
         for r in rows:
             mem = _mem_mb(r["xml"])
+            self.guard(f"restarting {r['vm']}")   # stop at once if leadership was lost
             try:
                 dest = self._place(mem, exclude=node)
                 progress(f"Restarting {r['vm']} on {dest}")

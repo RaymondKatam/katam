@@ -29,8 +29,13 @@ import urllib.request
 
 import yaml
 
-from .driver import ClusterError
+try:
+    from .driver import ClusterError
+except ImportError:          # katamctl lint on a CI runner without libvirt
+    class ClusterError(Exception):
+        pass
 
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 VAR = re.compile(r"\$\{([a-zA-Z0-9_.\-]+)\}")
 
 

@@ -1,0 +1,26 @@
+# Lets CI runners install the katam package and katamctl without the rest of the platform:
+#   pip install "git+https://github.com/RaymondKatam/katam#subdirectory=controller"
+#   katamctl runbook lint runbooks/
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "katam"
+dynamic = ["version"]
+description = "Katam Virtualization control plane and katamctl CLI"
+requires-python = ">=3.10"
+dependencies = ["requests", "PyYAML"]
+license = {text = "Apache-2.0"}
+
+[project.scripts]
+katamctl = "katam.cli:main"
+
+[tool.setuptools]
+packages = ["katam"]
+
+[tool.setuptools.dynamic]
+version = {attr = "katam.__version__"}
+
+[tool.setuptools.package-data]
+katam = ["static/*"]

@@ -1,10 +1,16 @@
-# Katam Virtualization 0.4
+# Katam Virtualization 0.5
 
 A virtualization platform for x86-64 servers, built on KVM, libvirt, Ceph and OVN.
 One web UI and REST API for VMs, images and OVAs, templates, GPU passthrough,
 micro-segmentation, HA with fencing and a witness, snapshots with retention locks and
 immutable S3 vault copies, DR, runbooks, FinOps and reports,
 with sign-in through Active Directory or SAML single sign-on.
+
+New in 0.5: the control plane can run on every node, with **leader election** through etcd and
+a replicated PostgreSQL ([docs/CLUSTER.md](docs/CLUSTER.md)); a **witness** breaks ties for
+two-node clusters and between PR and DR sites; **Prometheus metrics and a Grafana dashboard**
+([docs/MONITORING.md](docs/MONITORING.md)); and **runbooks managed in Git** with CI/CD
+([examples/gitops](examples/gitops/README.md)).
 
 **Download:** [latest installer ISO](https://github.com/RaymondKatam/katam/releases/latest) (free, Apache-2.0).
 
@@ -15,19 +21,21 @@ Quick install: [docs/INSTALL.md](docs/INSTALL.md). Full step-by-step guide: **Ka
 | Path | What it is |
 |---|---|
 | `controller/katam/` | Control plane (Python, Flask): API, UI, HA, DR, SDN, FinOps |
-| `node-setup/` | Node prep (`katam-node-setup`), Ceph, OVN, RBD mirroring, stretch cluster, netplan examples |
+| `node-setup/` | Node prep (`katam-node-setup`), `katam-cluster` (etcd + Patroni control plane), Ceph, OVN, RBD mirroring, stretch cluster, netplan examples |
 | `packaging/build-debs.sh` | Builds `katam-controller`, `katam-node`, `katam-witness` .deb packages |
 | `installer/build-offline-iso.sh` | Builds the offline installer ISO from Ubuntu 24.04 packages |
 | `installer/iso/katam-install` | The installer that runs from the ISO (interactive or unattended) |
 | `.github/workflows/release.yml` | Tag a version to build and publish the ISO, packages, apt repo and update feed |
 | `release/` | Apt repository publisher, update-feed generator, release notes template |
 | `website/download.html` | Download page for a blog or GitHub Pages (reads the update feed) |
-| `examples/` | Stack file for `katamctl apply`, Terraform, Ansible, runbooks |
+| `examples/` | Stack file for `katamctl apply`, Terraform, Ansible, runbooks, a GitOps runbook repo with CI pipelines |
+| `integrations/` | Grafana dashboard and provisioning, Prometheus scrape job and alert rules |
+| `controller/tests/` | Tests (`python3 -m pytest controller/tests`; leader election tests start a real etcd) |
 | `config.example.yaml` | Every setting, commented |
 
 ## Quick start
 
-Boot each server from **katam-virtualization-0.4.0-amd64.iso** (USB or BMC virtual media,
+Boot each server from **katam-virtualization-0.5.0-amd64.iso** (USB or BMC virtual media,
 BIOS or UEFI, Secure Boot off). The installer asks for a role (node, controller,
 all-in-one, witness), the OS disk, the management network and an admin account, then
 installs offline: everything is on the ISO. Unattended installs take `katam.*` boot
@@ -47,7 +55,7 @@ sudo installer/build-offline-iso.sh
 server ISO and needs internet during installation.
 
 Already running Ubuntu 24.04? Skip the ISO:
-`sudo apt install ./katam-controller_0.4.0_all.deb` (or `katam-node`, `katam-witness`).
+`sudo apt install ./katam-controller_0.5.0_all.deb` (or `katam-node`, `katam-witness`).
 
 ## Hardware
 

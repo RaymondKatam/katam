@@ -1,0 +1,49 @@
+# CI/CD for a Katam runbook repository (GitHub Actions).
+#  - Pull requests: lint every runbook offline, then validate it against the live cluster
+#    (actions and parameters are checked by the controller; nothing is saved or run).
+#  - Pushes to main: tell Katam to sync now (the webhook does the same if you set one up),
+#    then optionally dry-run one runbook as a smoke test.
+#
+# Repository secrets: KATAM_URL (e.g. https://katam.example.com), KATAM_TOKEN (an API token of
+# a user with runbook.read; an admin token for the sync step).
+name: runbooks
+on:
+  pull_request:
+    paths: ["runbooks/**"]
+  push:
+    branches: [main]
+    paths: ["runbooks/**"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    env:
+      KATAM_URL: ${{ secrets.KATAM_URL }}
+      KATAM_TOKEN: ${{ secrets.KATAM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install "git+https://github.com/RaymondKatam/katam#subdirectory=controller"
+      - name: Lint (offline)
+        run: katamctl runbook lint runbooks/
+      - name: Validate against the cluster (skipped until the secrets exist)
+        if: ${{ env.KATAM_URL != '' }}
+        run: |
+          for f in runbooks/*.y*ml; do katamctl runbook validate "$f" > /dev/null && echo "ok $f"; done
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: lint
+    runs-on: ubuntu-24.04
+    env:
+      KATAM_URL: ${{ secrets.KATAM_URL }}
+      KATAM_TOKEN: ${{ secrets.KATAM_TOKEN }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install "git+https://github.com/RaymondKatam/katam#subdirectory=controller"
+      - name: Sync runbooks into Katam
+        run: katamctl gitops sync --wait
+      - name: Smoke test (dry run, changes nothing)
+        run: katamctl runbook run restart-with-health-check --dry-run -p vm=canary-01 -p host=canary-01

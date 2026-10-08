@@ -1,0 +1,23 @@
+# The same pipeline for GitLab CI. Variables: KATAM_URL, KATAM_TOKEN (masked).
+stages: [lint, deploy]
+default:
+  image: python:3.12-slim
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git >/dev/null
+    - pip install -q "git+https://github.com/RaymondKatam/katam#subdirectory=controller"
+
+lint:
+  stage: lint
+  script:
+    - katamctl runbook lint runbooks/
+    - 'if [ -n "$KATAM_URL" ]; then for f in runbooks/*.y*ml; do katamctl runbook validate "$f" >/dev/null && echo "ok $f"; done; fi'
+  rules:
+    - changes: [runbooks/**/*]
+
+deploy:
+  stage: deploy
+  script:
+    - katamctl gitops sync --wait
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: [runbooks/**/*]

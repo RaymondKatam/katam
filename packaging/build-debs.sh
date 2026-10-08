@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build katam-controller, katam-node and katam-witness .deb packages into ./dist
 set -euo pipefail
-VER=${VER:-0.4.0}
+VER=${VER:-0.5.0}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/packaging/dist"
 B=$(mktemp -d)
@@ -14,17 +14,26 @@ cp -r "$ROOT/controller/katam" $P/usr/lib/katam/
 sed -i "s/^__version__ = .*/__version__ = \"$VER\"/" $P/usr/lib/katam/katam/__init__.py
 find $P -name __pycache__ -prune -exec rm -rf {} +
 cp "$ROOT/config.example.yaml" $P/usr/share/katam/
-cp -r "$ROOT/examples" $P/usr/share/katam/
+cp -r "$ROOT/examples" "$ROOT/integrations" $P/usr/share/katam/
 cp "$ROOT/README.md" "$ROOT/ARCHITECTURE.md" $P/usr/share/doc/katam-controller/
 cat > $P/usr/bin/katamctl <<'EOF'
 #!/bin/sh
 PYTHONPATH=/usr/lib/katam exec python3 -m katam.cli "$@"
 EOF
 chmod 755 $P/usr/bin/katamctl
+cat > $P/usr/lib/katam/katam-vip <<'EOF'
+#!/usr/bin/python3
+# Adds or removes the control plane's virtual IP. Called by the leader (katam.service).
+import sys
+sys.path.insert(0, "/usr/lib/katam")
+from katam.leader import vip_helper_main
+vip_helper_main()
+EOF
+chmod 755 $P/usr/lib/katam/katam-vip
 cat > $P/lib/systemd/system/katam.service <<'EOF'
 [Unit]
 Description=Katam Virtualization control plane
-After=network-online.target postgresql.service
+After=network-online.target postgresql.service etcd.service patroni.service
 Wants=network-online.target
 
 [Service]
@@ -35,6 +44,11 @@ Environment=PYTHONPATH=/usr/lib/katam
 ExecStart=/usr/bin/python3 -m katam
 Restart=on-failure
 RestartSec=3
+# On SIGTERM the leader releases leadership at once, so another controller takes over.
+TimeoutStopSec=20
+# Only for the virtual IP (cluster.vip): add/remove an address and announce it with ARP.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/katam
@@ -62,14 +76,16 @@ Package: katam-controller
 Version: $VER
 Architecture: all
 Maintainer: Katam Virtualization <admin@katam.local>
-Depends: python3 (>= 3.10), python3-flask, python3-waitress, python3-yaml, python3-sqlalchemy, python3-libvirt, python3-pycdlib, python3-ldap3, python3-onelogin-saml2, python3-requests, python3-boto3, python3-lxml, python3-xmlsec, libvirt-clients, novnc, python3-websockify, openssh-client, qemu-utils, openssl
-Recommends: python3-psycopg2
+Depends: python3 (>= 3.10), python3-flask, python3-waitress, python3-yaml, python3-sqlalchemy, python3-libvirt, python3-pycdlib, python3-ldap3, python3-onelogin-saml2, python3-requests, python3-boto3, python3-lxml, python3-xmlsec, libvirt-clients, novnc, python3-websockify, openssh-client, qemu-utils, openssl, git, iproute2
+Recommends: python3-psycopg2, iputils-arping, etcd-server, etcd-client, patroni, postgresql
 Section: admin
 Priority: optional
 Homepage: https://katam.local
 Description: Katam Virtualization control plane
  Web UI, REST API and CLI for KVM clusters: VMs, images, OVA import/export,
  RBAC with AD and SAML, SDN with OVN, HA with fencing, DR, runbooks and FinOps.
+ Controllers can run on every node with etcd leader election and replicated
+ PostgreSQL; Prometheus metrics, Grafana dashboards and runbooks kept in Git.
 EOF
 echo "/etc/katam/config.yaml" > $P/DEBIAN/conffiles.unused
 rm $P/DEBIAN/conffiles.unused
@@ -78,7 +94,7 @@ cat > $P/DEBIAN/postinst <<'EOF'
 set -e
 if [ "$1" = configure ]; then
   id katam >/dev/null 2>&1 || useradd -r -m -d /var/lib/katam -s /usr/sbin/nologin katam
-  install -d -o katam -g katam -m 750 /var/lib/katam /var/lib/katam/console-tokens /var/lib/katam/staging /var/lib/katam/exports /var/lib/katam/.ssh
+  install -d -o katam -g katam -m 750 /var/lib/katam /var/lib/katam/console-tokens /var/lib/katam/staging /var/lib/katam/exports /var/lib/katam/.ssh /var/lib/katam/gitops
   [ -f /var/lib/katam/.ssh/id_ed25519 ] || su -s /bin/sh katam -c "ssh-keygen -q -t ed25519 -N '' -C katam@controller -f /var/lib/katam/.ssh/id_ed25519"
   install -d -m 755 /etc/katam
   if [ ! -f /etc/katam/config.yaml ]; then
@@ -111,27 +127,30 @@ chmod 755 $P/DEBIAN/postinst $P/DEBIAN/prerm
 N=$B/katam-node
 install -d $N/DEBIAN $N/usr/share/katam-node $N/usr/sbin
 cp "$ROOT"/node-setup/* $N/usr/share/katam-node/
-chmod 755 $N/usr/share/katam-node/*.sh
+chmod 755 $N/usr/share/katam-node/*.sh $N/usr/share/katam-node/katam-cluster
 ln -s /usr/share/katam-node/prepare-node.sh $N/usr/sbin/katam-node-setup
+ln -s /usr/share/katam-node/katam-cluster $N/usr/sbin/katam-cluster
 cat > $N/DEBIAN/control <<EOF
 Package: katam-node
 Version: $VER
 Architecture: all
 Maintainer: Katam Virtualization <admin@katam.local>
 Depends: bash, sudo, openssh-server
-Recommends: qemu-system-x86, libvirt-daemon-system, ceph-common
+Recommends: qemu-system-x86, libvirt-daemon-system, ceph-common, etcd-server, etcd-client, patroni, postgresql
 Section: admin
 Priority: optional
 Description: Katam Virtualization node setup tools
  katam-node-setup prepares any x86-64 Ubuntu 24.04 server as a KVM node
- (Intel or AMD). Also ships Ceph, OVN, RBD mirroring and stretch-cluster scripts
- in /usr/share/katam-node.
+ (Intel or AMD). katam-cluster runs the control plane on the nodes (etcd leader
+ election, Patroni PostgreSQL). Also ships Ceph, OVN, RBD mirroring and
+ stretch-cluster scripts in /usr/share/katam-node.
 EOF
 
 # ---------------- katam-witness ----------------
 W=$B/katam-witness
 install -d $W/DEBIAN $W/usr/lib/katam-witness $W/lib/systemd/system $W/etc/default
 cp "$ROOT/controller/katam/witness.py" $W/usr/lib/katam-witness/katam_witness.py
+install -m 755 "$ROOT/node-setup/katam-cluster" $W/usr/lib/katam-witness/katam-cluster
 cat > $W/lib/systemd/system/katam-witness.service <<'EOF'
 [Unit]
 Description=Katam witness (second opinion for HA fencing)
@@ -157,12 +176,15 @@ Package: katam-witness
 Version: $VER
 Architecture: all
 Maintainer: Katam Virtualization <admin@katam.local>
-Depends: python3, python3-flask, python3-waitress
+Depends: python3, python3-flask, python3-waitress, openssl
+Recommends: etcd-server, etcd-client
 Section: admin
 Priority: optional
 Description: Katam Virtualization witness
  Small probe service for a third location. The controller fences a node only
- when the witness also can't reach it. Can share a host with a Ceph arbiter mon.
+ when the witness also can't reach it, and a DR site fails over only when the
+ witness confirms the primary is down. With etcd it is the tie-breaker vote for
+ two-node clusters (/usr/lib/katam-witness/katam-cluster join ...).
 EOF
 cat > $W/DEBIAN/postinst <<'EOF'
 #!/bin/sh

@@ -1,0 +1,13 @@
+# Add under scrape_configs: in prometheus.yml.
+# Scrape every controller (each reports itself; only the leader reports leader=1), or just the
+# virtual IP. Create the token with: openssl rand -hex 24, and put the same value in
+# /etc/katam/config.yaml under metrics.token.
+scrape_configs:
+  - job_name: katam
+    scrape_interval: 30s
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/katam-metrics.token
+    static_configs:
+      - targets: ["172.20.10.11:8080", "172.20.10.12:8080", "172.20.10.13:8080"]

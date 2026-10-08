@@ -1,0 +1,22 @@
+name: export-for-vmware
+description: Shut a VM down, export it as an OVA for VMware, start it again
+params:
+  vm: {required: true}
+steps:
+  - name: shutdown
+    action: vm.power
+    args: {vm: "${params.vm}", action: shutdown}
+  - name: stopped
+    action: wait.state
+    args: {vm: "${params.vm}", state: stopped, timeout: 600}
+    on_failure: rollback
+    rollback:
+      action: vm.power
+      args: {vm: "${params.vm}", action: start}
+  - name: export
+    action: vm.export
+    args: {vm: "${params.vm}", format: ova}
+    on_failure: continue
+  - name: start-again
+    action: vm.power
+    args: {vm: "${params.vm}", action: start}

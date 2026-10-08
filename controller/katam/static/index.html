@@ -32,6 +32,8 @@
   </div>
   <div class="top-right">
     <label class="inline">Project <select id="project-filter"><option value="">All projects</option></select></label>
+    <span id="cluster-pill" class="pill" hidden title="Control-plane leader"></span>
+    <a id="grafana-link" class="ghost small linkbtn" href="#" target="_blank" rel="noopener" hidden>Grafana</a>
     <span id="whoami" class="muted"></span>
     <button id="btn-logout" class="ghost small" type="button">Sign out</button>
   </div>
@@ -103,10 +105,12 @@
 
   <section data-panel="runbooks" hidden>
     <div class="vms-head"><h2>Runbooks</h2><button id="btn-rb" class="primary" type="button">New runbook</button></div>
+    <div id="gitops" class="status-strip" hidden></div>
     <div class="table-wrap"><table id="rb-table"><thead><tr><th>Name</th><th>Description</th><th>Updated</th><th></th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section data-panel="dr" hidden>
+    <div id="drwatch" class="status-strip" hidden></div>
     <div class="vms-head"><h2>DR plans</h2><button id="btn-dr" class="primary" type="button">New plan</button></div>
     <div class="table-wrap"><table id="dr-table"><thead><tr><th>Plan</th><th>Site</th><th>VMs</th><th>Last run</th><th>Measured RTO</th><th>Data age (RPO)</th><th></th></tr></thead><tbody></tbody></table></div>
   </section>

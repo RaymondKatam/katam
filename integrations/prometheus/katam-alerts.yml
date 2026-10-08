@@ -1,0 +1,33 @@
+# Optional alert rules (rule_files: in prometheus.yml).
+groups:
+  - name: katam
+    rules:
+      - alert: KatamNoControlPlaneLeader
+        expr: max(katam_controller_is_leader) < 1 or absent(katam_controller_is_leader == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "No Katam controller is leader: HA, schedules and syncs are paused"}
+      - alert: KatamNodeDown
+        expr: katam_node_up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Node {{ $labels.node }} isn't answering libvirt"}
+      - alert: KatamNodeFenced
+        expr: katam_node_state{state="fenced"} == 1
+        labels: {severity: critical}
+        annotations: {summary: "Node {{ $labels.node }} was fenced; its VMs were restarted elsewhere"}
+      - alert: KatamEtcdEndpointDown
+        expr: katam_etcd_endpoint_healthy == 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "etcd endpoint {{ $labels.endpoint }} is unhealthy (one more failure may lose the majority)"}
+      - alert: KatamMemoryOvercommitted
+        expr: katam_node_memory_committed_bytes / katam_node_memory_bytes > 0.9
+        for: 30m
+        labels: {severity: warning}
+        annotations: {summary: "Node {{ $labels.node }} has over 90% of its memory committed to VMs"}
+      - alert: KatamUnprotectedVMs
+        expr: katam_vms_without_policy > 0
+        for: 1d
+        labels: {severity: info}
+        annotations: {summary: "{{ $value }} VM(s) have no snapshot policy"}
