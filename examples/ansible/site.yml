@@ -1,0 +1,37 @@
+# ansible-playbook site.yml -e katam_token=katam_xxx
+- hosts: localhost
+  gather_facts: false
+  vars:
+    katam: https://katam.lab.local
+    vms:
+      - {name: ans-db-01, template: ubuntu-small, ip: 172.20.20.81/24}
+      - {name: ans-db-02, template: ubuntu-small, ip: 172.20.20.82/24}
+  tasks:
+    - name: Current VMs
+      uri:
+        url: "{{ katam }}/api/v1/vms"
+        headers: {Authorization: "Bearer {{ katam_token }}"}
+      register: current
+
+    - name: Create missing VMs
+      uri:
+        url: "{{ katam }}/api/v1/vms"
+        method: POST
+        headers: {Authorization: "Bearer {{ katam_token }}"}
+        body_format: json
+        body: "{{ item | combine({'project': 'default'}) }}"
+        status_code: 202
+      loop: "{{ vms }}"
+      when: item.name not in (current.json | map(attribute='name') | list)
+      register: created
+
+    - name: Wait for the create tasks
+      uri:
+        url: "{{ katam }}/api/v1/tasks/{{ item.json.task }}"
+        headers: {Authorization: "Bearer {{ katam_token }}"}
+      register: t
+      until: t.json.status != 'running'
+      retries: 60
+      delay: 5
+      failed_when: t.json.status == 'failed'
+      loop: "{{ created.results | selectattr('json', 'defined') | list }}"

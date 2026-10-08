@@ -1,0 +1,18 @@
+name: restart-with-health-check
+description: Reboot a VM and confirm it answers on a TCP port afterwards
+params:
+  vm: {required: true}
+  host: {required: true}
+  port: {default: 22}
+steps:
+  - name: reboot
+    action: vm.power
+    args: {vm: "${params.vm}", action: reboot}
+  - name: settle
+    action: sleep
+    args: {seconds: 20}
+  - name: port-open
+    action: tcp.check
+    args: {host: "${params.host}", port: "${params.port}"}
+    retries: 10
+    retry_delay: 6

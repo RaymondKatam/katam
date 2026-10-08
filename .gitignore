@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+packaging/dist/
+installer/build/
+installer/*.iso
+installer/*.iso.sha256
+release/repo.conf
+release/katam-archive-keyring.gpg
+*.asc

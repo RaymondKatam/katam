@@ -1,0 +1,5 @@
+Katam Virtualization
+Copyright 2026 Raymond Kipngetich
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+Built on KVM, QEMU, libvirt, Ceph, Open vSwitch, OVN and Ubuntu packages, each under its own license.

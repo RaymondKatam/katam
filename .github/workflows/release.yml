@@ -1,0 +1,128 @@
+# Release pipeline. Push a tag like v0.3.1 and this:
+#   1. builds the .deb packages (versioned from the tag)
+#   2. builds the offline installer ISO
+#   3. publishes a GitHub Release with the ISO, checksum, package manifest and .debs
+#   4. adds the packages to the signed apt repository and updates releases.json on GitHub Pages
+#
+# One-time setup (see docs/RELEASING.md):
+#   - repository secret KATAM_GPG_PRIVATE_KEY  (armored private signing key)
+#   - repository secret KATAM_GPG_KEY_ID       (key id or email)
+#   - Settings > Pages: deploy from branch gh-pages
+# Tags with a suffix (v0.4.0-beta1) go to the "beta" channel; plain tags go to "stable".
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.3.1)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Tag pushes build automatically only after the signing secrets are set up and the
+    # repository variable KATAM_AUTO_RELEASE is "true" (Settings > Secrets and variables >
+    # Actions > Variables). Until then, releases are published by hand and can still be
+    # built from the Actions tab with "Run workflow".
+    if: github.event_name == 'workflow_dispatch' || vars.KATAM_AUTO_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Version and channel
+        id: v
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          if [[ "$VER" == *-* ]]; then CH=beta; else CH=stable; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "channel=$CH" >> "$GITHUB_OUTPUT"
+          echo "pages=https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space for the ISO build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debootstrap squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin \
+            mtools dosfstools apt-utils gnupg dpkg-dev
+
+      - name: Import signing key
+        env:
+          KEY: ${{ secrets.KATAM_GPG_PRIVATE_KEY }}
+          KEY_ID: ${{ secrets.KATAM_GPG_KEY_ID }}
+        run: |
+          echo "$KEY" | gpg --batch --import
+          gpg --export "$KEY_ID" > release/katam-archive-keyring.gpg
+          printf 'KATAM_APT_URL=%s/apt\nKATAM_APT_CHANNEL=%s\n' "${{ steps.v.outputs.pages }}" "${{ steps.v.outputs.channel }}" > release/repo.conf
+
+      - name: Build packages
+        run: VER=${{ steps.v.outputs.ver }} packaging/build-debs.sh
+
+      - name: Build installer ISO
+        run: |
+          sudo --preserve-env=VER,WORK,OUT bash installer/build-offline-iso.sh
+          sudo chown -R "$USER" "$RUNNER_TEMP/out"
+        env:
+          VER: ${{ steps.v.outputs.ver }}
+          WORK: ${{ runner.temp }}/build
+          OUT: ${{ runner.temp }}/out/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.iso
+
+      - name: Package manifest
+        run: sudo chroot "$RUNNER_TEMP/build/chroot" dpkg-query -W -f='${Package} ${Version}\n' > "$RUNNER_TEMP/out/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.manifest"
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: Katam Virtualization ${{ steps.v.outputs.ver }}
+          prerelease: ${{ steps.v.outputs.channel == 'beta' }}
+          body_path: release/notes.md
+          files: |
+            ${{ runner.temp }}/out/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.iso
+            ${{ runner.temp }}/out/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.iso.sha256
+            ${{ runner.temp }}/out/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.manifest
+            packaging/dist/*.deb
+
+      - name: Get current site (keeps older packages and feed entries)
+        run: |
+          git fetch origin gh-pages --depth 1 && git worktree add site origin/gh-pages || mkdir -p site
+
+      - name: Update apt repository and feed
+        env:
+          KATAM_GPG_KEY_ID: ${{ secrets.KATAM_GPG_KEY_ID }}
+        run: |
+          release/publish-apt-repo.sh packaging/dist site ${{ steps.v.outputs.channel }}
+          SHA=$(cut -d' ' -f1 "$RUNNER_TEMP/out/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.iso.sha256")
+          REL="https://github.com/${GITHUB_REPOSITORY}/releases"
+          release/make-feed.py --version ${{ steps.v.outputs.ver }} --channel ${{ steps.v.outputs.channel }} \
+            --base "${{ steps.v.outputs.pages }}" \
+            --iso-url "$REL/download/${{ steps.v.outputs.tag }}/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.iso" \
+            --sha256 "$SHA" --notes-url "$REL/tag/${{ steps.v.outputs.tag }}" --feed site/releases.json
+          cp website/download.html site/index.html
+          touch site/.nojekyll
+
+      - name: Publish GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: site
+          keep_files: true
+          exclude_assets: ".git,.github"

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Katam Virtualization</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<section id="login" class="login" hidden>
+  <form id="form-login" class="login-card">
+    <h1>Katam Virtualization</h1>
+    <p class="muted">Sign in to manage your virtual machines.</p>
+    <label>Username<input name="username" autocomplete="username" required></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <p id="login-error" class="error" role="alert" hidden></p>
+    <button class="primary" type="submit">Sign in</button>
+    <a id="sso" class="sso" href="/auth/saml/login" hidden>Sign in with SSO</a>
+    <p id="login-hint" class="muted small" hidden>Use your Active Directory username and password.</p>
+  </form>
+</section>
+
+<div id="app" hidden>
+<header class="top">
+  <div>
+    <h1>Katam Virtualization</h1>
+    <p id="summary" class="muted">Connecting to nodes</p>
+  </div>
+  <div class="top-right">
+    <label class="inline">Project <select id="project-filter"><option value="">All projects</option></select></label>
+    <span id="whoami" class="muted"></span>
+    <button id="btn-logout" class="ghost small" type="button">Sign out</button>
+  </div>
+</header>
+
+<div id="update-banner" class="update-banner" hidden role="status">
+  <span id="update-text"></span>
+  <a id="update-notes" href="#" target="_blank" rel="noopener">Release notes</a>
+  <button id="btn-rollout" class="small" type="button">Upgrade nodes</button>
+</div>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="vms" aria-selected="true">Virtual machines</button>
+  <button role="tab" data-tab="images">Images and templates</button>
+  <button role="tab" data-tab="security">Security groups</button>
+  <button role="tab" data-tab="protection">Protection</button>
+  <button role="tab" data-tab="runbooks">Runbooks</button>
+  <button role="tab" data-tab="dr">Disaster recovery</button>
+  <button role="tab" data-tab="reports">Costs and reports</button>
+  <button role="tab" data-tab="access">Access</button>
+</nav>
+
+<main>
+  <section data-panel="vms">
+    <section class="rack" id="rack" aria-label="Nodes and memory use"></section>
+    <p class="legend muted">Each bar is a node's RAM. Blocks are VMs sized by memory; the hatched end is kept for the host and Ceph.</p>
+    <div class="vms-head">
+      <h2>Virtual machines</h2>
+      <div class="head-actions">
+        <input id="filter" type="search" placeholder="Filter by name, node or IP" aria-label="Filter VMs">
+        <button id="btn-new" class="primary" type="button">New VM</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="vm-table">
+        <thead><tr><th>Name</th><th>State</th><th>Project</th><th>Node</th><th>vCPU</th><th>Memory</th><th>Addresses</th><th><span class="sr">Actions</span></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="vm-empty" class="empty" hidden>No VMs yet. Create one with New VM.</p>
+  </section>
+
+  <section data-panel="images" hidden>
+    <div class="vms-head"><h2>Images</h2><button id="btn-import" class="primary" type="button">Import image or OVA</button></div>
+    <div class="table-wrap"><table id="img-table"><thead><tr><th>Name</th><th>Status</th><th>OS</th><th>Firmware</th><th>Size</th><th>Project</th><th>Source</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="vms-head spaced"><h2>Templates</h2><button id="btn-tpl" class="ghost" type="button">New template</button></div>
+    <div class="table-wrap"><table id="tpl-table"><thead><tr><th>Name</th><th>Image or ISO</th><th>Size</th><th>Networks</th><th>Project</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="vms-head spaced"><h2>Exports</h2></div>
+    <p class="muted">OVA and VMDK exports open in VMware vSphere and Workstation; VHDX in Hyper-V; qcow2 in Proxmox and OpenStack.</p>
+    <div class="table-wrap"><table id="exp-table"><thead><tr><th>File</th><th>Size</th><th>Created</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section data-panel="security" hidden>
+    <div class="vms-head"><h2>Security groups</h2><button id="btn-sg" class="primary" type="button">New group</button></div>
+    <p class="muted" id="sg-note">Every VM port denies inbound and outbound traffic unless a group allows it. Groups can allow traffic from other groups, so rules follow VMs as they move.</p>
+    <div id="sg-list" class="cards"></div>
+  </section>
+
+  <section data-panel="protection" hidden>
+    <div class="vms-head"><h2>Snapshot schedules</h2><button id="btn-pol" class="primary" type="button">New schedule</button></div>
+    <p class="muted">Locked snapshots can't be deleted through Katam before their lock ends, and their VMs can't be deleted either. Vault copies go to S3 storage with Object Lock: nobody can delete them before their retention date.</p>
+    <div class="table-wrap"><table id="pol-table"><thead><tr><th>Schedule</th><th>Covers</th><th>Every</th><th>Keep</th><th>Lock</th><th>Vault</th><th>Last run</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="vms-head spaced"><h2>Immutable vault</h2></div>
+    <p id="vault-status" class="muted"></p>
+    <div class="table-wrap"><table id="vault-table"><thead><tr><th>VM</th><th>Copy</th><th>Disks</th><th>Size</th><th>Immutable until</th><th>Status</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="vms-head spaced"><h2>Coverage</h2></div>
+    <div class="table-wrap"><table id="cov-table"><thead><tr><th>VM</th><th>Project</th><th>Schedules</th><th>Snapshots</th><th>Locked</th><th>Last snapshot</th><th>Vault until</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section data-panel="runbooks" hidden>
+    <div class="vms-head"><h2>Runbooks</h2><button id="btn-rb" class="primary" type="button">New runbook</button></div>
+    <div class="table-wrap"><table id="rb-table"><thead><tr><th>Name</th><th>Description</th><th>Updated</th><th></th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section data-panel="dr" hidden>
+    <div class="vms-head"><h2>DR plans</h2><button id="btn-dr" class="primary" type="button">New plan</button></div>
+    <div class="table-wrap"><table id="dr-table"><thead><tr><th>Plan</th><th>Site</th><th>VMs</th><th>Last run</th><th>Measured RTO</th><th>Data age (RPO)</th><th></th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section data-panel="reports" hidden>
+    <div class="vms-head"><h2>Costs, last 30 days</h2></div>
+    <div id="finops" class="finops"></div>
+    <div class="vms-head spaced"><h2>Reports</h2>
+      <label class="inline">Period <select id="rep-days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></label>
+    </div>
+    <div class="table-wrap"><table id="rep-table"><thead><tr><th>Report</th><th>What it shows</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="vms-head spaced"><h2>Kubernetes</h2></div>
+    <p class="muted">Clusters running on Katam can use Ceph volumes through ceph-csi. Download the Helm values and install the chart from the commands at the top of the file.</p>
+    <a class="button ghost" href="/api/v1/kubernetes/ceph-csi">Download ceph-csi values</a>
+  </section>
+
+  <section data-panel="access" hidden>
+    <div id="access-admin" hidden>
+      <div class="vms-head"><h2>Users</h2><button id="btn-user" class="primary" type="button">Add local user</button></div>
+      <div class="table-wrap"><table id="user-table"><thead><tr><th>Name</th><th>Source</th><th>Email</th><th>Status</th><th></th></tr></thead><tbody></tbody></table></div>
+      <div class="vms-head spaced"><h2>Role bindings</h2><button id="btn-bind" class="ghost" type="button">Grant a role</button></div>
+      <p class="muted">Bind a role to a user (user:name) or a directory group (group:Katam-Admins) for one project or all of them (*). AD and SSO groups arrive at sign-in.</p>
+      <div class="table-wrap"><table id="bind-table"><thead><tr><th>Subject</th><th>Role</th><th>Project</th><th></th></tr></thead><tbody></tbody></table></div>
+      <div class="vms-head spaced"><h2>Projects</h2><button id="btn-proj" class="ghost" type="button">New project</button></div>
+      <div class="table-wrap"><table id="proj-table"><thead><tr><th>Project</th><th>VMs</th><th>vCPUs</th><th>Memory</th><th>Quota</th><th></th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="vms-head spaced"><h2>Your account</h2><button id="btn-pass" class="ghost" type="button">Change my password</button></div>
+    <p class="muted" id="acct-note">Directory and SSO accounts change their password in Active Directory or the identity provider.</p>
+    <div class="vms-head spaced"><h2>API tokens</h2><button id="btn-token" class="ghost" type="button">Create token</button></div>
+    <p class="muted">Tokens let Terraform, Ansible, CI and katamctl act as you. Send them as Authorization: Bearer.</p>
+    <div class="table-wrap"><table id="tok-table"><thead><tr><th>Name</th><th>Owner</th><th>Last used</th><th>Expires</th><th></th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="tasks">
+    <h2>Recent tasks</h2>
+    <ol id="task-list"></ol>
+  </section>
+</main>
+</div>
+
+<dialog id="dlg-new">
+  <form id="form-new" method="dialog">
+    <h2>New virtual machine</h2>
+    <div class="grid2">
+      <label>Name<input name="vmname" required pattern="[a-z0-9][a-z0-9\-]{0,38}[a-z0-9]" placeholder="k3s-worker-04" autocomplete="off"></label>
+      <label>Project<select name="project"></select></label>
+    </div>
+    <fieldset class="seg">
+      <legend>Start from</legend>
+      <label><input type="radio" name="kind" value="template" checked> Template</label>
+      <label><input type="radio" name="kind" value="image"> Image</label>
+      <label><input type="radio" name="kind" value="iso"> ISO installer</label>
+    </fieldset>
+    <label data-kind="template">Template<select name="template"></select></label>
+    <label data-kind="image" hidden>Image<select name="image"></select></label>
+    <div data-kind="iso" class="grid2" hidden>
+      <label>ISO<select name="iso"></select></label>
+      <label>Guest OS<select name="os_type"><option value="linux">Linux</option><option value="windows">Windows</option><option value="other">Other (BSD, appliance)</option></select></label>
+    </div>
+    <div class="grid3">
+      <label>vCPUs<input name="vcpus" type="number" min="1" value="2"></label>
+      <label>Memory (GB)<input name="memory_gb" type="number" min="1" value="4"></label>
+      <label>Disk (GB)<input name="disk_gb" type="number" min="1" value="40"></label>
+    </div>
+    <fieldset><legend>Networks <span class="muted">(first one is the primary interface)</span></legend><div id="net-choices" class="checks"></div></fieldset>
+    <fieldset id="sg-field" hidden><legend>Security groups</legend><div id="sg-choices" class="checks"></div></fieldset>
+    <div class="grid2" id="row-gpu" hidden>
+      <label>GPUs<input name="gpus" type="number" min="0" max="8" value="0"></label>
+      <label>GPU model<select name="gpu_model"></select></label>
+    </div>
+    <div class="grid2">
+      <label>Node<select name="node"><option value="">Pick automatically</option></select></label>
+      <label>Firmware<select name="firmware"><option value="">From image</option><option value="bios">BIOS</option><option value="uefi">UEFI</option></select></label>
+    </div>
+    <div id="ci-fields">
+      <label>Static IP <span class="muted">(blank uses DHCP)</span><input name="ip" placeholder="172.20.20.50/24" autocomplete="off"></label>
+      <label>SSH public keys <span class="muted">(blank uses the defaults in config)</span><textarea name="ssh_keys" rows="2" placeholder="ssh-ed25519 AAAA…"></textarea></label>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" name="start" checked> Start after creating</label>
+      <label><input type="checkbox" name="autostart"> Start when its node boots</label>
+      <label><input type="checkbox" name="ha" checked> Restart elsewhere if its node fails</label>
+    </div>
+    <p class="error" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="ghost" data-close>Cancel</button><button type="submit" class="primary">Create VM</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-migrate">
+  <form id="form-migrate" method="dialog">
+    <h2>Move <span id="mig-name"></span></h2>
+    <p class="muted">Running VMs move live with no downtime. Install media and the cloud-init disk are ejected first.</p>
+    <label>Destination node<select name="node"></select></label>
+    <p class="error" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="ghost" data-close>Cancel</button><button type="submit" class="primary">Move VM</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-import">
+  <form id="form-import" method="dialog">
+    <h2>Import an image</h2>
+    <p class="muted">qcow2, raw, VMDK, VHD, VHDX and OVA. An OVA also creates a template with its CPU, memory and disks.</p>
+    <div class="grid2">
+      <label>Name<input name="name" required pattern="[a-z0-9][a-z0-9\-]{0,38}[a-z0-9]" placeholder="ubuntu-2404"></label>
+      <label>Shared with<select name="project"><option value="">Every project</option></select></label>
+    </div>
+    <fieldset class="seg"><legend>Source</legend>
+      <label><input type="radio" name="src" value="url" checked> Download from a URL</label>
+      <label><input type="radio" name="src" value="file"> Upload a file</label>
+    </fieldset>
+    <label data-src="url">URL<input name="url" type="url" placeholder="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"></label>
+    <label data-src="file" hidden>File<input name="file" type="file" accept=".qcow2,.img,.raw,.vmdk,.vhd,.vhdx,.ova"></label>
+    <div class="grid2">
+      <label>Guest OS<select name="os_type"><option value="linux">Linux</option><option value="windows">Windows</option><option value="other">Other</option></select></label>
+      <label>Firmware<select name="firmware"><option value="bios">BIOS</option><option value="uefi">UEFI</option></select></label>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" name="cloud_init" checked> Cloud image (configure with cloud-init)</label>
+      <label><input type="checkbox" name="v2v"> Coming from VMware: convert with virt-v2v</label>
+    </div>
+    <p class="error" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="ghost" data-close>Cancel</button><button type="submit" class="primary">Import</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-snap">
+  <form id="form-snap" method="dialog">
+    <h2>Snapshots of <span id="snap-vm"></span></h2>
+    <div class="table-wrap"><table id="snap-table"><thead><tr><th>Name</th><th>Taken</th><th>Locked until</th><th>Quiesced</th><th></th></tr></thead><tbody></tbody></table></div>
+    <p id="snap-empty" class="muted" hidden>No snapshots yet.</p>
+    <h3 class="spaced">Take a snapshot</h3>
+    <div class="grid3">
+      <label>Name<input name="name" placeholder="before-upgrade"></label>
+      <label>Lock (days)<input name="lock_days" type="number" min="0" value="0"></label>
+      <label>Vault copy (days)<input name="vault_days" type="number" min="0" value="0"></label>
+    </div>
+    <p class="muted small">Lock 0 = can be deleted any time. Vault 0 = no vault copy.</p>
+    <p class="error" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="ghost" data-close>Close</button><button type="submit" class="primary">Take snapshot</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-edit">
+  <form id="form-edit" method="dialog">
+    <h2 id="edit-title">Edit</h2>
+    <p id="edit-help" class="muted"></p>
+    <label id="edit-name-row">Name<input name="name" autocomplete="off"></label>
+    <label>Definition<textarea name="body" rows="16" class="code" spellcheck="false"></textarea></label>
+    <p class="error" role="alert" hidden></p>
+    <pre id="edit-output" class="output" hidden></pre>
+    <div class="actions"><button type="button" class="ghost" data-close>Close</button><button type="button" class="ghost" id="edit-extra" hidden></button><button type="submit" class="primary" id="edit-save">Save</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

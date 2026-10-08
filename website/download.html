@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download Katam Virtualization</title>
+<meta name="description" content="Katam Virtualization: an open-source virtualization platform for x86-64 servers, built on KVM, Ceph and OVN. Download the installer ISO.">
+<style>
+  :root { --ink:#16212B; --muted:#5A6A77; --line:#C6D0D8; --bg:#F4F7F9; --panel:#FFFFFF; --accent:#1B5AA8; --code:#EEF2F5; --btn-ink:#FFFFFF; }
+  @media (prefers-color-scheme: dark) { :root { --ink:#E6EDF2; --muted:#9AA9B5; --line:#2E3B46; --bg:#121A21; --panel:#18222B; --accent:#6EA8F0; --code:#1E2A34; --btn-ink:#0B1520; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); }
+  main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .5rem; }
+  h2 { font-size: 1.3rem; margin: 2.5rem 0 .75rem; }
+  p.lead { color: var(--muted); font-size: 1.1rem; margin: 0 0 1.5rem; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1.25rem 1.5rem; }
+  .dl { display:flex; flex-wrap:wrap; gap:1rem; align-items:center; justify-content:space-between; }
+  a { color: var(--accent); }
+  .btn { display:inline-block; background:var(--accent); color:var(--btn-ink); text-decoration:none; font-weight:600; padding:.75rem 1.25rem; border-radius:6px; }
+  .meta { color: var(--muted); font-size: .9rem; }
+  code, pre { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size: .88rem; }
+  code { background: var(--code); padding: .1rem .35rem; border-radius: 4px; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: .9rem 1rem; overflow-x: auto; }
+  .sha { word-break: break-all; }
+  ol, ul { padding-left: 1.3rem; } li { margin: .35rem 0; }
+  table { width:100%; border-collapse: collapse; font-size: .95rem; }
+  th, td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  .note { border-left: 4px solid #B5561B; padding: .6rem 1rem; background: var(--panel); border-radius: 0 6px 6px 0; }
+  .tablewrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Katam Virtualization</h1>
+  <p class="lead">An open-source virtualization platform for x86-64 servers. KVM virtual machines, Ceph storage, software-defined networking with micro-segmentation, HA with fencing, DR, and a web UI and API over all of it.</p>
+
+  <div class="card dl">
+    <div>
+      <strong id="ver">Latest release</strong>
+      <div class="meta" id="rel">Installer ISO for BIOS and UEFI servers, about 600 MB. Installs offline.</div>
+    </div>
+    <a class="btn" id="iso" href="https://github.com/RaymondKatam/katam/releases/latest">Download ISO</a>
+  </div>
+  <p class="meta">SHA-256: <span class="sha" id="sha">see the release page</span> · <a id="notes" href="https://github.com/RaymondKatam/katam/releases/latest">Release notes</a> · <a href="https://github.com/RaymondKatam/katam">Source code</a></p>
+
+  <h2>What you need</h2>
+  <ul>
+    <li>x86-64 servers with Intel VT-x/VT-d or AMD-V/AMD-Vi (Dell, HPE, Lenovo, Supermicro, Huawei and others).</li>
+    <li>One server for a lab (all-in-one), or three or more for Ceph storage, HA and live migration.</li>
+    <li>An OS disk per server (a RAID 1 mirror is ideal) and, for Ceph, empty data disks in HBA/JBOD mode.</li>
+    <li>A small VM or box for the controller (2 vCPU, 4 GB RAM) unless you use all-in-one.</li>
+  </ul>
+
+  <h2>Install in five steps</h2>
+  <ol>
+    <li><strong>Prepare firmware.</strong> Enable VT-x and VT-d (Intel) or SVM and IOMMU (AMD). Turn Secure Boot off on the host.</li>
+    <li><strong>Boot the ISO</strong> from a USB stick (<code>dd</code>, Rufus or balenaEtcher) or the BMC's virtual media (iDRAC, iLO, XClarity, iBMC).</li>
+    <li><strong>Answer the installer:</strong> role (node, controller, all-in-one or witness), the OS disk, the management network, and an admin account. It installs without internet access.</li>
+    <li><strong>Join nodes to the controller.</strong> On each node:
+      <pre>sudo katam-node-setup --controller-key "ssh-ed25519 AAAA... katam@controller" \
+  --controller-ip &lt;controller-ip&gt; --peers "&lt;node storage IPs&gt;"</pre>
+      The controller's key is in <code>/var/lib/katam/.ssh/id_ed25519.pub</code> on the controller.</li>
+    <li><strong>Sign in.</strong> Edit <code>/etc/katam/config.yaml</code> on the controller to list your nodes, storage and networks, run <code>sudo systemctl restart katam</code>, then open <code>http://&lt;controller-ip&gt;:8080</code>. The first admin password is in <code>/root/katam-initial-admin.txt</code>.</li>
+  </ol>
+  <p>For three or more nodes, set up Ceph with <code>/usr/share/katam-node/ceph-bootstrap.sh</code> on the first node; it prints the settings to paste into <code>config.yaml</code>.</p>
+
+  <h2>Install several servers unattended</h2>
+  <p>Press <code>e</code> on the first boot menu entry, add parameters to the end of the <code>linux</code> line, then press Ctrl+X:</p>
+  <pre>katam.auto=1 katam.role=node katam.disk=/dev/sda katam.iface=eno1
+katam.ip=172.20.10.11/24 katam.gw=172.20.10.1 katam.dns=172.20.10.1
+katam.hostname=hv1 katam.password=Change-Me-Now</pre>
+  <p class="meta">Anyone with BMC console access can read boot parameters, so change the password after installing.</p>
+
+  <h2>Updates</h2>
+  <p>Installed servers receive new versions from a signed apt repository. When a release is out, admins see a banner in the Katam UI with an <strong>Upgrade nodes</strong> button that upgrades nodes one at a time, moving VMs away first. Upgrade the controller with <code>sudo apt update &amp;&amp; sudo apt upgrade</code>.</p>
+
+  <h2>What's included</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Area</th><th>Features</th></tr>
+    <tr><td>Compute</td><td>Linux, Windows (UEFI, Secure Boot, TPM 2.0) and other guests; GPU passthrough; live migration</td></tr>
+    <tr><td>Images</td><td>Import qcow2, raw, VMDK, VHD/VHDX and OVA; templates; export to OVA (VMware), VHDX (Hyper-V), qcow2</td></tr>
+    <tr><td>Access</td><td>Projects, quotas, roles, API tokens; Active Directory (LDAP) and SAML single sign-on</td></tr>
+    <tr><td>Networking</td><td>VLAN bridges or OVN networks with routing, NAT and default-deny security groups</td></tr>
+    <tr><td>Resilience</td><td>HA restart with BMC fencing and a witness; DR with Ceph stretch clusters or RBD mirroring</td></tr>
+    <tr><td>Data protection</td><td>Scheduled, quiesced snapshots with retention locks; immutable copies in S3 with Object Lock</td></tr>
+    <tr><td>Operations</td><td>REST API, CLI, declarative stack files, runbooks, cost tracking, reports</td></tr>
+  </table></div>
+
+  <h2>Status</h2>
+  <p class="note">Katam is early software (0.x). The installer, web UI, API, access control, image import/export, HA restart and metering have been tested. Ceph, OVN networking, BMC fencing, DR mirroring and directory sign-in follow standard tooling but have had limited testing on real hardware. Try it in a lab before trusting it with production workloads, and keep backups.</p>
+
+  <h2>License and credits</h2>
+  <p class="meta">Katam Virtualization is open source; see the LICENSE file in the source repository. It is built on KVM, QEMU, libvirt, Ceph, Open vSwitch, OVN and Ubuntu 24.04 packages, whose sources are available from their projects and the Ubuntu archive. Katam is not affiliated with or endorsed by Canonical or any hardware vendor named here.</p>
+</main>
+
+<script>
+  // Point this at your GitHub Pages feed. The page still works with the static links above if it can't load.
+  const FEED = "https://RaymondKatam.github.io/katam/releases.json";
+  fetch(FEED).then(r => r.ok ? r.json() : Promise.reject()).then(f => {
+    const r = (f.channels && f.channels.stable || [])[0];
+    if (!r) return;
+    document.getElementById("ver").textContent = `Katam Virtualization ${r.version}`;
+    document.getElementById("rel").textContent = `Released ${r.released}. Installer ISO for BIOS and UEFI servers, about 600 MB. Installs offline.`;
+    if (r.iso) document.getElementById("iso").href = r.iso;
+    if (r.sha256) document.getElementById("sha").textContent = r.sha256;
+    if (r.notes) document.getElementById("notes").href = r.notes;
+  }).catch(() => {});
+</script>
+</body>
+</html>

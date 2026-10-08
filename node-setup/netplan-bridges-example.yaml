@@ -1,0 +1,33 @@
+# /etc/netplan/60-katam.yaml on hv1. Copy to each node and change the .11 addresses.
+# Find your port names with: ip -br link   (10/25 GbE ports are often named ens1f0/ens1f1
+# or enp24s0f0/f1). Apply with: netplan try
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens1f0: { mtu: 9000 }
+    ens1f1: { mtu: 9000 }
+  bonds:
+    bond0:
+      interfaces: [ens1f0, ens1f1]
+      mtu: 9000
+      parameters:
+        mode: 802.3ad            # needs a matching LACP port-channel on the switch
+        lacp-rate: fast
+        transmit-hash-policy: layer3+4
+  vlans:
+    vlan10: { id: 10, link: bond0 }
+    vlan20: { id: 20, link: bond0 }
+    vlan30: { id: 30, link: bond0, mtu: 9000, addresses: [172.20.30.11/24] }   # Ceph + migration
+    vlan40: { id: 40, link: bond0 }
+    vlan50: { id: 50, link: bond0 }
+  bridges:
+    br10:
+      interfaces: [vlan10]
+      addresses: [172.20.10.11/24]
+      routes: [{ to: default, via: 172.20.10.1 }]
+      nameservers: { addresses: [172.20.10.1] }
+      parameters: { stp: false, forward-delay: 0 }
+    br20: { interfaces: [vlan20], parameters: { stp: false, forward-delay: 0 } }
+    br40: { interfaces: [vlan40], parameters: { stp: false, forward-delay: 0 } }
+    br50: { interfaces: [vlan50], parameters: { stp: false, forward-delay: 0 } }

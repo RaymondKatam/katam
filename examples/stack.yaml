@@ -1,0 +1,19 @@
+# katamctl apply -f stack.yaml --dry-run    (then without --dry-run)
+project: k8s-lab
+security_groups:
+  - name: k8s-nodes
+    description: Kubernetes nodes talk to each other; SSH and API from management
+    rules:
+      - {direction: ingress, protocol: any, remote_group: k8s-nodes}
+      - {direction: ingress, protocol: tcp, ports: "22", remote: 172.20.10.0/24}
+      - {direction: ingress, protocol: tcp, ports: "6443", remote: 172.20.10.0/24}
+      - {direction: egress, protocol: any, remote: 0.0.0.0/0}
+templates:
+  - name: k3s-node
+    label: K3s node (4 vCPU, 8 GB)
+    spec: {image: ubuntu-2404, vcpus: 4, memory_gb: 8, disk_gb: 60, networks: [k8s]}
+vms:
+  - {name: k3s-cp-01, template: k3s-node, ip: 172.20.20.51/24}
+  - {name: k3s-w-01, template: k3s-node, ip: 172.20.20.61/24}
+  - {name: k3s-w-02, template: k3s-node, ip: 172.20.20.62/24}
+# prune: true   # also delete VMs in this project that aren't listed

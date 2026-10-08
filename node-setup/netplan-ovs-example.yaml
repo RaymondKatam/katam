@@ -1,0 +1,28 @@
+# Example for SDN nodes: the LACP bond carries all VLANs into an OVS bridge.
+# Host addresses live on OVS internal VLAN interfaces; VM VLANs are OVN localnet
+# networks (type ovn-vlan in config.yaml). Change interface names to match `ip link`.
+network:
+  version: 2
+  ethernets:
+    nic0: {match: {name: "ens1f0"}, set-name: nic0}
+    nic1: {match: {name: "ens1f1"}, set-name: nic1}
+  bonds:
+    bond0:
+      interfaces: [nic0, nic1]
+      parameters: {mode: 802.3ad, lacp-rate: fast, transmit-hash-policy: layer3+4}
+  bridges:
+    br-provider:
+      interfaces: [bond0]
+      openvswitch: {}
+  vlans:
+    mgmt:
+      id: 10
+      link: br-provider
+      addresses: [172.20.10.11/24]
+      routes: [{to: default, via: 172.20.10.1}]
+      nameservers: {addresses: [172.20.10.1]}
+    storage:
+      id: 30
+      link: br-provider
+      addresses: [172.20.30.11/24]
+      mtu: 9000

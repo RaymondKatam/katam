@@ -1,0 +1,17 @@
+# Example LACP trunk for Huawei VRP switches (S5700/S6700 families). Adapt port names and VLANs.
+# One LACP trunk per server carrying VLANs 10-50 (example for node hv1).
+system-view
+vlan batch 10 20 30 40 50
+interface Eth-Trunk1
+ description hv1
+ mode lacp
+ port link-type trunk
+ port trunk allow-pass vlan 10 20 30 40 50
+ undo port trunk allow-pass vlan 1
+ jumboframe enable 9216
+interface XGigabitEthernet0/0/1
+ eth-trunk 1
+interface XGigabitEthernet0/0/2
+ eth-trunk 1
+quit
+save

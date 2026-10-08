@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# Katam Virtualization installer. Runs from the live ISO on tty1 and installs Ubuntu 24.04
+# plus Katam to a local disk, offline. Works on BIOS and UEFI x86-64 servers.
+set -uo pipefail
+
+VER=0.4.0
+TITLE="Katam Virtualization $VER installer"
+SRC=/cdrom/casper/filesystem.squashfs
+DEBS=/opt/katam-debs
+T=/target
+LOG=/var/log/katam-install.log
+export NEWT_COLORS='root=,blue window=,lightgray border=black,lightgray title=blue,lightgray button=white,blue actbutton=white,blue checkbox=black,lightgray actcheckbox=white,blue entry=black,white textbox=black,lightgray'
+
+# Unattended mode: set KATAM_AUTO=1 and the KATAM_* values below, or boot with
+#   katam.auto=1 katam.role=node katam.disk=/dev/sda katam.iface=eno1 katam.ip=172.20.10.11/24
+#   katam.gw=172.20.10.1 katam.dns=172.20.10.1 katam.vlan=10 katam.hostname=hv1
+#   katam.admin=katamadmin katam.password=... katam.sshkey="ssh-ed25519 ..." katam.tz=UTC
+# (katam.password on the boot line is visible to anyone with BMC console access; change it after install.)
+for kv in $(tr ' ' '\n' </proc/cmdline | grep '^katam\.' || true); do
+  k=${kv%%=*}; v=${kv#*=}; k=KATAM_$(tr 'a-z.' 'A-Z_' <<<"${k#katam.}")
+  [[ -z ${!k:-} ]] && export "$k=$v"
+done
+AUTO=${KATAM_AUTO:-}
+
+say()  { if [[ -n $AUTO ]]; then echo -e "$1"; else whiptail --title "$TITLE" --msgbox "$1" 0 0 --scrolltext; fi; }
+ask()  { whiptail --title "$TITLE" --inputbox "$1" 10 72 "${2:-}" 3>&1 1>&2 2>&3; }
+pw()   { whiptail --title "$TITLE" --passwordbox "$1" 10 72 3>&1 1>&2 2>&3; }
+yes_no() { whiptail --title "$TITLE" --yesno "$1" 0 0; }
+die()  { say "Installation failed:\n\n$1\n\nDetails are in $LOG. Press OK for a shell; type katam-install to try again."; exit 1; }
+need() { [[ -n ${!1:-} ]] || die "Unattended install needs $1 (katam.${2})"; }
+run()  { echo "+ $*" >>"$LOG"; "$@" >>"$LOG" 2>&1 || die "Command failed: $*"; }
+in_target() { run chroot "$T" "$@"; }
+
+[[ $EUID -eq 0 ]] || { echo "Run as root"; exit 1; }
+# Two kinds of media: the offline ISO carries the whole system image; the network ISO
+# (/etc/katam-netinstall) downloads Ubuntu and the virtualization packages during install.
+MODE=offline
+[[ -f /etc/katam-netinstall || ${KATAM_MODE:-} == net ]] && MODE=net
+MIRROR=${KATAM_MIRROR:-http://archive.ubuntu.com/ubuntu}
+PROXY=${KATAM_PROXY:-}
+if [[ $MODE == offline ]]; then
+  SRC=${KATAM_SRC:-$SRC}
+  [[ -f $SRC ]] || SRC=$(ls /run/live/medium/casper/filesystem.squashfs /media/cdrom/casper/filesystem.squashfs 2>/dev/null | head -1)
+  [[ -f ${SRC:-} ]] || { echo "Can't find the installer image (filesystem.squashfs)."; exit 1; }
+fi
+: >"$LOG"
+
+# ---------------------------------------------------------------- answers
+if [[ -n $AUTO ]]; then
+  need KATAM_ROLE role; need KATAM_DISK disk; need KATAM_IFACE iface; need KATAM_PASSWORD password
+  ROLE=$KATAM_ROLE; DISK=$KATAM_DISK; IFACE=$KATAM_IFACE; VLAN=${KATAM_VLAN:-}
+  IPCIDR=${KATAM_IP:-}; GW=${KATAM_GW:-}; DNS=${KATAM_DNS:-${KATAM_GW:-}}
+  HOST=${KATAM_HOSTNAME:-katam-$ROLE}; ADMIN=${KATAM_ADMIN:-katamadmin}; P1=$KATAM_PASSWORD
+  SSHKEY=${KATAM_SSHKEY:-}; TZ=${KATAM_TZ:-UTC}
+  [[ $ROLE =~ ^(node|controller|allinone|witness)$ ]] || die "katam.role must be node, controller, allinone or witness"
+  [[ -b $DISK ]] || die "$DISK is not a disk"
+  [[ -z $IPCIDR || -n $GW ]] || die "katam.ip needs katam.gw"
+  echo "Unattended install: $ROLE on $DISK, $HOST, ${IPCIDR:-DHCP} ($MODE)"
+else
+# ---------------------------------------------------------------- live network (net mode)
+net_up() {
+  local nd=/run/systemd/network dev=$IFACE
+  mkdir -p $nd; rm -f $nd/10-katam*
+  if [[ -n $VLAN ]]; then
+    printf '[NetDev]\nName=%s.%s\nKind=vlan\n[VLAN]\nId=%s\n' "$IFACE" "$VLAN" "$VLAN" > $nd/10-katam-vlan.netdev
+    printf '[Match]\nName=%s\n[Network]\nVLAN=%s.%s\nLinkLocalAddressing=no\n' "$IFACE" "$IFACE" "$VLAN" > $nd/10-katam-parent.network
+    dev=$IFACE.$VLAN
+  fi
+  if [[ -n $IPCIDR ]]; then
+    { printf '[Match]\nName=%s\n[Network]\nAddress=%s\nGateway=%s\n' "$dev" "$IPCIDR" "$GW"
+      for d in ${DNS//,/ }; do echo "DNS=$d"; done; } > $nd/10-katam.network
+  else
+    printf '[Match]\nName=%s\n[Network]\nDHCP=ipv4\n' "$dev" > $nd/10-katam.network
+  fi
+  networkctl reload >>"$LOG" 2>&1; networkctl reconfigure "$IFACE" >>"$LOG" 2>&1
+  for _ in $(seq 1 30); do
+    curl -fsI --max-time 5 ${PROXY:+-x "$PROXY"} "$MIRROR/dists/noble/Release" >>"$LOG" 2>&1 && return 0
+    sleep 3
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- welcome
+grep -qwE 'vmx|svm' /proc/cpuinfo && VT="Hardware virtualization: enabled" \
+  || VT="WARNING: hardware virtualization is OFF. Enable VT-x/VT-d (Intel) or SVM/IOMMU (AMD) in firmware before using this server as a node."
+CPU=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)
+MEM=$(awk '/MemTotal/{printf "%.0f GB", $2/1048576}' /proc/meminfo)
+FW=$([[ -d /sys/firmware/efi ]] && echo UEFI || echo BIOS)
+whiptail --title "$TITLE" --yes-button "Install" --no-button "Shell" --yesno \
+"This installs Ubuntu Server 24.04 and Katam Virtualization on this server. $( [[ $MODE == net ]] && echo 'It downloads Ubuntu packages from the internet during installation (about 1 GB).' || echo 'No internet connection is needed.')
+
+CPU:      $CPU
+Memory:   $MEM
+Firmware: $FW
+$VT
+
+You'll choose a role, the disk to install to, the network, and an administrator account." 18 78 || exit 0
+
+# ---------------------------------------------------------------- role
+ROLE=$(whiptail --title "$TITLE" --menu "What should this server be?" 17 78 4 \
+  node       "Node: runs VMs (KVM, libvirt, Ceph, OVN)" \
+  controller "Controller: web UI, API, HA, DR, FinOps" \
+  allinone   "All-in-one: controller and node on one server" \
+  witness    "Witness: HA tie-breaker at a third location" 3>&1 1>&2 2>&3) || exit 0
+
+# ---------------------------------------------------------------- disk
+# The device the installer booted from (USB stick or virtual CD) must never be offered.
+LIVE_SRC=$(findmnt -no SOURCE /cdrom 2>/dev/null || true)
+LIVE_DEV=""
+[[ -n $LIVE_SRC ]] && LIVE_DEV="/dev/$(lsblk -no PKNAME "$LIVE_SRC" 2>/dev/null | head -1)"
+[[ $LIVE_DEV == /dev/ ]] && LIVE_DEV=$LIVE_SRC
+# Match on TYPE only: MODEL can be empty or contain spaces, which shifts columns.
+mapfile -t DISKS < <(lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}' | grep -vxF "${LIVE_DEV:-/none}" | grep -vE '^/dev/(loop|sr|zram|ram)')
+[[ ${#DISKS[@]} -gt 0 ]] || die "No disks found. Check the RAID controller has a virtual disk for the OS."
+MENU=()
+for name in "${DISKS[@]}"; do
+  size=$(lsblk -dno SIZE "$name" | xargs)
+  model=$(lsblk -dno MODEL "$name" | xargs); tran=$(lsblk -dno TRAN "$name" | xargs)
+  MENU+=("$name" "$size  ${model:-disk} ${tran:+($tran)}")
+done
+DISK=$(whiptail --title "$TITLE" --menu "Install to which disk? Pick the operating-system disk (usually the RAID 1 virtual disk). Never pick a disk meant for Ceph." 20 78 10 "${MENU[@]}" 3>&1 1>&2 2>&3) || exit 0
+
+# ---------------------------------------------------------------- network
+mapfile -t IFACES < <(ls /sys/class/net | grep -vE '^(lo|virbr|docker|ovs|br-|vnet)')
+IMENU=()
+for i in "${IFACES[@]}"; do
+  st=$(cat /sys/class/net/$i/operstate 2>/dev/null); mac=$(cat /sys/class/net/$i/address 2>/dev/null)
+  sp=$(cat /sys/class/net/$i/speed 2>/dev/null || true); [[ ${sp:-0} -gt 0 ]] && sp="${sp} Mb/s" || sp=""
+  IMENU+=("$i" "$st  $mac  $sp")
+done
+IFACE=$(whiptail --title "$TITLE" --menu "Management network interface. You can build bonds and VLANs after installing (see the guide, section 6.2)." 18 78 8 "${IMENU[@]}" 3>&1 1>&2 2>&3) || exit 0
+VLAN=$(ask "VLAN ID for management on $IFACE (leave empty if the switch port is untagged/access):" "") || exit 0
+if yes_no "Use a static IP address? (Recommended for servers.)\n\nChoose No for DHCP."; then
+  while :; do
+    IPCIDR=$(ask "IP address with prefix, e.g. 172.20.10.11/24:" "") || exit 0
+    [[ $IPCIDR =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] && break; say "That doesn't look like 172.20.10.11/24. Try again."
+  done
+  GW=$(ask "Default gateway:" "$(cut -d. -f1-3 <<<"${IPCIDR%/*}").1") || exit 0
+  DNS=$(ask "DNS servers, separated by commas:" "$GW") || exit 0
+else
+  IPCIDR=""
+fi
+HOST=$(ask "Hostname (for nodes use the name you'll put in config.yaml, e.g. hv1):" "$( [[ $ROLE == node ]] && echo hv1 || echo katam-$ROLE)") || exit 0
+HOST=$(tr 'A-Z' 'a-z' <<<"$HOST" | tr -cd 'a-z0-9-')
+
+# ---------------------------------------------------------------- account
+ADMIN=$(ask "Administrator username for SSH and the console:" "katamadmin") || exit 0
+ADMIN=$(tr -cd 'a-z0-9_-' <<<"$ADMIN")
+[[ -n $ADMIN && $ADMIN != katam && $ADMIN != root ]] || die "Pick a different username (not katam or root)."
+while :; do
+  P1=$(pw "Password for $ADMIN (8+ characters):") || exit 0
+  P2=$(pw "Type it again:") || exit 0
+  [[ ${#P1} -ge 8 && $P1 == "$P2" ]] && break
+  say "The passwords didn't match or were shorter than 8 characters."
+done
+SSHKEY=$(ask "Optional: paste an SSH public key for $ADMIN (leave empty to skip):" "") || exit 0
+TZ=$(ask "Time zone:" "UTC") || exit 0
+if [[ $MODE == net ]]; then
+  PROXY=$(ask "HTTP proxy or apt cache for downloads, e.g. http://172.20.10.5:3142 (leave empty for direct):" "$PROXY") || exit 0
+fi
+
+yes_no "Ready to install.
+
+  Role:      $ROLE
+  Disk:      $DISK  (EVERYTHING ON IT WILL BE ERASED)
+  Network:   $IFACE${VLAN:+ VLAN $VLAN}  ${IPCIDR:-DHCP}${IPCIDR:+ via $GW}
+  Hostname:  $HOST
+  Admin:     $ADMIN
+
+Install now?" || exit 0
+
+fi
+
+if [[ $MODE == net && -z ${KATAM_TEST_NO_NET:-} ]]; then
+  [[ -n $AUTO ]] || whiptail --title "$TITLE" --infobox "Connecting to $MIRROR ..." 7 70
+  net_up || die "Can't reach $MIRROR through $IFACE${VLAN:+.$VLAN}. Check the cable, VLAN, IP settings and proxy, then try again. Nothing on the disk was changed."
+fi
+
+# ---------------------------------------------------------------- install
+part() { [[ $1 =~ [0-9]$ ]] && echo "${1}p$2" || echo "${1}$2"; }
+gauge() { printf 'XXX\n%d\n%s\nXXX\n' "$1" "$2"; }
+{
+gauge 5 "Partitioning $DISK"
+umount -R $T 2>/dev/null; swapoff -a 2>/dev/null
+wipefs -af "$DISK" >>"$LOG" 2>&1
+sgdisk --zap-all "$DISK" >>"$LOG" 2>&1
+sgdisk -n1:0:+1M -t1:EF02 -c1:biosboot -n2:0:+512M -t2:EF00 -c2:efi -n3:0:0 -t3:8300 -c3:root "$DISK" >>"$LOG" 2>&1 || exit 11
+partprobe "$DISK"; udevadm settle; sleep 2
+ESP=$(part "$DISK" 2); ROOT=$(part "$DISK" 3)
+mkfs.vfat -F32 -n EFI "$ESP" >>"$LOG" 2>&1 || exit 12
+mkfs.ext4 -F -L katam-root "$ROOT" >>"$LOG" 2>&1 || exit 13
+mkdir -p $T && mount "$ROOT" $T && mkdir -p $T/boot/efi && mount "$ESP" $T/boot/efi || exit 14
+
+if [[ $MODE == net ]]; then
+  gauge 8 "Downloading Ubuntu 24.04 base system"
+  ${PROXY:+env http_proxy=$PROXY https_proxy=$PROXY} debootstrap --arch=amd64 --components=main,universe noble $T "$MIRROR" >>"$LOG" 2>&1 || exit 15
+else
+  gauge 10 "Copying the system (several minutes)"
+  unsquashfs -f -d $T "$SRC" >>"$LOG" 2>&1 || exit 15
+fi
+
+gauge 70 "Configuring"
+for m in dev dev/pts proc sys run; do mount --bind /$m $T/$m; done
+[[ -d /sys/firmware/efi/efivars ]] && mount -t efivarfs efivarfs $T/sys/firmware/efi/efivars 2>/dev/null
+if [[ $MODE == net ]]; then
+  gauge 25 "Downloading and installing packages for the $ROLE role (10-30 minutes)"
+  printf 'deb %s noble main universe\ndeb %s noble-updates main universe\ndeb %s noble-security main universe\n' \
+    "$MIRROR" "$MIRROR" "$MIRROR" > $T/etc/apt/sources.list
+  [[ -n $PROXY ]] && printf 'Acquire::http::Proxy "%s";\n' "$PROXY" > $T/etc/apt/apt.conf.d/90katam-proxy
+  rm -f $T/etc/resolv.conf; cp -L /etc/resolv.conf $T/etc/resolv.conf
+  printf '#!/bin/sh\nexit 101\n' > $T/usr/sbin/policy-rc.d; chmod +x $T/usr/sbin/policy-rc.d
+  printf 'GRUB_DEFAULT=0\nGRUB_TIMEOUT_STYLE=menu\nGRUB_TIMEOUT=3\nGRUB_DISTRIBUTOR="Katam Virtualization"\nGRUB_CMDLINE_LINUX_DEFAULT=""\nGRUB_CMDLINE_LINUX=""\n' > $T/etc/default/grub
+  BASEPKG="linux-generic initramfs-tools zstd kmod systemd-sysv netplan.io systemd-resolved openssh-server sudo chrony curl nano vim-tiny less
+    iputils-ping iproute2 ethtool pciutils usbutils lshw dmidecode bash-completion tmux rsync grub-pc-bin
+    grub-efi-amd64-bin grub2-common efibootmgr locales tzdata ca-certificates gdisk parted dosfstools e2fsprogs
+    lvm2 mdadm ipmitool smartmontools nvme-cli jq"
+  NODEPKG="qemu-system-x86 qemu-utils qemu-block-extra ipxe-qemu seabios ovmf swtpm swtpm-tools
+    libvirt-daemon-system libvirt-clients tuned cpu-checker ufw uuid-runtime xorriso ceph-common cephadm podman
+    openvswitch-switch ovn-host ovn-central"
+  case $ROLE in node|allinone) EXTRA=$NODEPKG ;; *) EXTRA="" ;; esac
+  ALLPKG=$(echo $BASEPKG $EXTRA)   # one line: the list spans several lines above
+  chroot $T bash -c "export DEBIAN_FRONTEND=noninteractive LANG=C; apt-get update -q && \
+    apt-get install -y -q --no-install-recommends $ALLPKG && locale-gen en_US.UTF-8 && apt-get clean" >>"$LOG" 2>&1 || exit 22
+  gauge 65 "Packages installed"
+fi
+cat > $T/etc/fstab <<EOF
+UUID=$(blkid -s UUID -o value "$ROOT")  /          ext4  errors=remount-ro  0 1
+UUID=$(blkid -s UUID -o value "$ESP")  /boot/efi  vfat  umask=0077         0 1
+EOF
+echo "$HOST" > $T/etc/hostname
+printf '127.0.0.1 localhost\n127.0.1.1 %s\n' "$HOST" > $T/etc/hosts
+rm -f $T/etc/machine-id $T/var/lib/dbus/machine-id; chroot $T systemd-machine-id-setup >>"$LOG" 2>&1
+ln -sf /usr/share/zoneinfo/$TZ $T/etc/localtime 2>/dev/null; echo "$TZ" > $T/etc/timezone
+# network
+rm -f $T/etc/netplan/*.yaml
+{
+  echo "network:"
+  echo "  version: 2"
+  echo "  ethernets:"
+  echo "    $IFACE:"
+  if [[ -n $VLAN ]]; then
+    echo "      dhcp4: false"
+    echo "  vlans:"
+    echo "    $IFACE.$VLAN:"
+    echo "      id: $VLAN"
+    echo "      link: $IFACE"
+  fi
+  if [[ -n $IPCIDR ]]; then
+    echo "      addresses: [$IPCIDR]"
+    echo "      routes: [{to: default, via: $GW}]"
+    echo "      nameservers: {addresses: [$DNS]}"
+  else
+    echo "      dhcp4: true"
+  fi
+} > $T/etc/netplan/50-katam-install.yaml
+chmod 600 $T/etc/netplan/50-katam-install.yaml
+# account
+chroot $T useradd -m -s /bin/bash -G sudo,adm "$ADMIN" >>"$LOG" 2>&1
+echo "$ADMIN:$P1" | chroot $T chpasswd
+if [[ -n $SSHKEY ]]; then
+  install -d -m700 $T/home/$ADMIN/.ssh; echo "$SSHKEY" > $T/home/$ADMIN/.ssh/authorized_keys
+  chmod 600 $T/home/$ADMIN/.ssh/authorized_keys; chroot $T chown -R "$ADMIN:$ADMIN" /home/$ADMIN/.ssh
+fi
+passwd -R $T -l root >>"$LOG" 2>&1
+rm -f $T/etc/ssh/ssh_host_*; chroot $T ssh-keygen -A >>"$LOG" 2>&1
+rm -f $T/etc/systemd/system/netplan-ovs-cleanup.service $T/etc/systemd/system/getty@tty1.service.d/zz-katam-live.conf $T/root/.bash_profile $T/etc/katam-live $T/usr/local/sbin/katam-install
+
+gauge 80 "Installing Katam ($ROLE)"
+mkdir -p $T/var/cache/katam && cp $DEBS/*.deb $T/var/cache/katam/
+KEYRING=$(ls "$T"/var/cache/katam/katam-archive-keyring_*.deb 2>/dev/null | head -1)
+case $ROLE in
+  node)       PKGS="katam-node" ;;
+  controller) PKGS="katam-controller" ;;
+  allinone)   PKGS="katam-controller katam-node" ;;
+  witness)    PKGS="katam-witness" ;;
+esac
+DEBFILES=()
+[[ -n $KEYRING ]] && DEBFILES+=("/var/cache/katam/$(basename "$KEYRING")")
+for p in $PKGS; do
+  f=$(ls "$T"/var/cache/katam/${p}_*.deb 2>/dev/null | head -1)
+  [[ -n $f ]] || { echo "missing package $p" >>"$LOG"; exit 16; }
+  DEBFILES+=("/var/cache/katam/$(basename "$f")")
+done
+if [[ $MODE == net ]]; then
+  chroot $T env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${DEBFILES[@]}" >>"$LOG" 2>&1 || exit 16
+  rm -f $T/usr/sbin/policy-rc.d
+  rm -f $T/etc/resolv.conf; ln -s ../run/systemd/resolve/stub-resolv.conf $T/etc/resolv.conf
+  chroot $T systemctl enable ssh systemd-networkd systemd-resolved >>"$LOG" 2>&1
+else
+  chroot $T dpkg -i "${DEBFILES[@]}" >>"$LOG" 2>&1 || exit 16
+fi
+echo "$ROLE" > $T/etc/katam-role
+if [[ $ROLE == controller || $ROLE == witness ]]; then
+  chroot $T systemctl disable libvirtd libvirtd.socket openvswitch-switch ovn-controller >>"$LOG" 2>&1
+fi
+chroot $T dpkg --purge casper >>"$LOG" 2>&1
+
+gauge 88 "Installing the boot loader"
+sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=""/' $T/etc/default/grub
+sed -i 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=menu/; s/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=3/' $T/etc/default/grub
+chroot $T update-initramfs -u -k all >>"$LOG" 2>&1 || exit 17
+chroot $T grub-install --target=i386-pc "$DISK" >>"$LOG" 2>&1 || exit 18
+chroot $T grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram >>"$LOG" 2>&1 || exit 19
+if [[ -d /sys/firmware/efi ]]; then
+  chroot $T grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=katam >>"$LOG" 2>&1 || true
+fi
+# grub-mkconfig only writes root=UUID=... if /dev/disk/by-uuid has the link; make sure.
+RUUID=$(blkid -s UUID -o value "$ROOT")
+mkdir -p /dev/disk/by-uuid && ln -sf "../../${ROOT#/dev/}" "/dev/disk/by-uuid/$RUUID"
+chroot $T update-grub >>"$LOG" 2>&1 || exit 20
+grep -q "root=UUID=$RUUID" $T/boot/grub/grub.cfg || exit 21
+gauge 100 "Done"
+} | if [[ -n $AUTO ]]; then grep -vxE 'XXX|[0-9]+' | sed 's/^/  /'; else whiptail --title "$TITLE" --gauge "Starting" 8 78 0; fi
+RC=${PIPESTATUS[0]}
+[[ $RC -eq 0 ]] || die "Step $RC failed (see $LOG)."
+
+cp "$LOG" $T/var/log/ 2>/dev/null
+WEBHOST=${IPCIDR%/*}; [[ -n $WEBHOST ]] || WEBHOST="<server-ip>"
+NOTE=""
+case $ROLE in
+  node|allinone) NOTE="Next: sign in and run
+  sudo katam-node-setup --controller-key '<key>' --controller-ip <ip> --peers '<storage ips>'
+(the guide, section 6.3)." ;;
+esac
+case $ROLE in
+  controller|allinone) NOTE="$NOTE
+The Katam web UI will be at http://${WEBHOST}:8080
+First sign-in: user admin, password in /root/katam-initial-admin.txt (sudo cat it).
+Edit /etc/katam/config.yaml for your nodes, then: sudo systemctl restart katam" ;;
+  witness) NOTE="Copy the token from /etc/default/katam-witness to ha.witness_token on the controller." ;;
+esac
+umount -R $T 2>/dev/null
+say "Installation complete.
+
+$NOTE
+
+Remove the installer media (or unmount the BMC virtual media) and press OK to reboot."
+[[ -z $AUTO || -n ${KATAM_REBOOT:-} ]] && reboot
+exit 0

@@ -1,0 +1,12 @@
+# Ubuntu 24.04 ships all of these; the .deb installs them with apt.
+flask>=3.0          # python3-flask
+waitress>=2.1       # python3-waitress
+PyYAML>=6.0         # python3-yaml
+SQLAlchemy>=1.4     # python3-sqlalchemy
+libvirt-python      # python3-libvirt
+pycdlib>=1.11       # python3-pycdlib
+ldap3>=2.9          # python3-ldap3
+python3-saml>=1.12  # python3-onelogin-saml2
+requests            # python3-requests
+boto3               # python3-boto3 (immutable vault)
+psycopg2            # python3-psycopg2 (only with Postgres)
