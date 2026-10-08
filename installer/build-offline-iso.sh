@@ -12,7 +12,7 @@
 # Output: installer/katam-virtualization-0.4.0-amd64.iso (BIOS and UEFI, CD/DVD and USB).
 set -euo pipefail
 
-VER=${VER:-0.5.0}
+VER=${VER:-0.5.1}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 WORK=${WORK:-$HERE/build}

@@ -109,12 +109,31 @@ async function checkUpdates() {
     $("#update-banner").hidden = false;
   } catch { /* no feed configured or offline */ }
 }
-$("#btn-rollout").addEventListener("click", () => {
-  if (!confirm("Upgrade every node, one at a time? Each node goes into maintenance (its VMs move away), upgrades, and comes back.")) return;
-  const os = confirm("Also install Ubuntu security updates on the nodes? (OK = yes, Cancel = Katam packages only)");
-  const reboot = os && confirm("Reboot nodes that need it after updating?");
-  run("/api/v1/updates/rollout", "POST", { include_os: os, reboot });
+$("#btn-rollout").addEventListener("click", async () => {
+  if (!confirm("Upgrade Katam everywhere now?\n\nEach node in turn goes into maintenance (its VMs move to other nodes), upgrades and comes back; then the controllers upgrade and restart. Running VMs keep running.")) return;
+  const os = confirm("Also install Ubuntu security updates? (OK = yes, Cancel = Katam only)");
+  const reboot = os && confirm("Reboot nodes that need it after updating? (one at a time, VMs moved first)");
+  const from = state.me.version || "";
+  try {
+    const t = await post("/api/v1/updates/rollout", { include_os: os, reboot });
+    $("#update-text").textContent = "Upgrading: nodes one at a time, then the controller. Progress is under Recent tasks.";
+    $("#btn-rollout").hidden = true;
+    watchUpgrade(t.task, from);
+  } catch (e) { toast(e.message); }
 });
+
+async function watchUpgrade(task, from) {
+  // The controller restarts at the end; keep polling until it answers with the new version.
+  for (let i = 0; i < 720; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    try {
+      const h = await (await fetch("/healthz", { cache: "no-store" })).json();
+      if (from && h.version !== from) { $("#update-text").textContent = `Upgraded to Katam ${h.version}. Reloading...`; setTimeout(() => location.reload(), 2000); return; }
+      const t = await api(`/api/v1/tasks/${task}`).catch(() => null);
+      if (t && t.status === "failed") { $("#update-text").textContent = `Upgrade stopped: ${t.message}`; return; }
+    } catch { $("#update-text").textContent = "Controller restarting with the new version..."; }
+  }
+}
 
 /* ---------- tabs ---------- */
 $$(".tabs button").forEach((b) => b.addEventListener("click", () => {

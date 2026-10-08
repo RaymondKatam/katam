@@ -1,4 +1,4 @@
-# Katam Virtualization 0.5
+# Katam Virtualization 0.5.1
 
 A virtualization platform for x86-64 servers, built on KVM, libvirt, Ceph and OVN.
 One web UI and REST API for VMs, images and OVAs, templates, GPU passthrough,
@@ -10,7 +10,8 @@ New in 0.5: the control plane can run on every node, with **leader election** th
 a replicated PostgreSQL ([docs/CLUSTER.md](docs/CLUSTER.md)); a **witness** breaks ties for
 two-node clusters and between PR and DR sites; **Prometheus metrics and a Grafana dashboard**
 ([docs/MONITORING.md](docs/MONITORING.md)); and **runbooks managed in Git** with CI/CD
-([examples/gitops](examples/gitops/README.md)).
+([examples/gitops](examples/gitops/README.md)). 0.5.1 adds **one-click upgrades** of the whole platform
+from the UI.
 
 **Download:** [latest installer ISO](https://github.com/RaymondKatam/katam/releases/latest) (free, Apache-2.0).
 
@@ -35,7 +36,7 @@ Quick install: [docs/INSTALL.md](docs/INSTALL.md). Full step-by-step guide: **Ka
 
 ## Quick start
 
-Boot each server from **katam-virtualization-0.5.0-amd64.iso** (USB or BMC virtual media,
+Boot each server from **katam-virtualization-0.5.1-amd64.iso** (USB or BMC virtual media,
 BIOS or UEFI, Secure Boot off). The installer asks for a role (node, controller,
 all-in-one, witness), the OS disk, the management network and an admin account, then
 installs offline: everything is on the ISO. Unattended installs take `katam.*` boot
@@ -55,7 +56,7 @@ sudo installer/build-offline-iso.sh
 server ISO and needs internet during installation.
 
 Already running Ubuntu 24.04? Skip the ISO:
-`sudo apt install ./katam-controller_0.5.0_all.deb` (or `katam-node`, `katam-witness`).
+`sudo apt install ./katam-controller_0.5.1_all.deb` (or `katam-node`, `katam-witness`).
 
 ## Hardware
 

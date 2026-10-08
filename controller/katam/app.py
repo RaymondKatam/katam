@@ -310,7 +310,7 @@ def create_app(cfg_path=None, start_background=True):
     @app.get("/auth/me")
     def me():
         return jsonify(user=g.p.name, source=g.p.source, groups=g.p.groups, admin=g.p.is_admin,
-                       grants={k: sorted(v) for k, v in g.p.grants.items()})
+                       grants={k: sorted(v) for k, v in g.p.grants.items()}, version=__version__)
 
     def _saml():
         from onelogin.saml2.auth import OneLogin_Saml2_Auth
@@ -1363,13 +1363,20 @@ def create_app(cfg_path=None, start_background=True):
 
     @app.post("/api/v1/updates/rollout")
     def updates_rollout():
-        """Upgrade nodes one at a time (maintenance, apt upgrade, optional reboot)."""
+        """One click: every node one at a time (VMs move away first), then the controllers."""
         need("iam.admin")
         b = request.get_json(force=True) or {}
         tid = tasks.submit("updates.rollout", "cluster:updates",
-                           lambda p: updates.rollout(p, include_os=bool(b.get("include_os")), reboot=bool(b.get("reboot"))),
+                           lambda p: updates.rollout(p, include_os=bool(b.get("include_os")),
+                                                     reboot=bool(b.get("reboot")),
+                                                     controller=b.get("controller", True) is not False),
                            actor())
         return jsonify(task=tid), 202
+
+    @app.get("/api/v1/updates/self")
+    def updates_self():
+        need("iam.admin")
+        return jsonify(version=__version__, last=updates.self_status())
 
     # ---- OpenAPI (generated from the routes) --------------------------------
     @app.get("/api/v1/openapi.json")

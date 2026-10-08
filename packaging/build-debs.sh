@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build katam-controller, katam-node and katam-witness .deb packages into ./dist
 set -euo pipefail
-VER=${VER:-0.5.0}
+VER=${VER:-0.5.1}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/packaging/dist"
 B=$(mktemp -d)
@@ -30,6 +30,30 @@ from katam.leader import vip_helper_main
 vip_helper_main()
 EOF
 chmod 755 $P/usr/lib/katam/katam-vip
+install -m 755 "$ROOT/packaging/katam-self-upgrade" $P/usr/lib/katam/katam-self-upgrade
+# One-click upgrade of this controller: the service (unprivileged) drops a request file;
+# this root-owned path unit notices it and runs katam-self-upgrade.
+cat > $P/lib/systemd/system/katam-upgrade.path <<'EOF'
+[Unit]
+Description=Watch for Katam upgrade requests from the web UI
+
+[Path]
+PathExists=/var/lib/katam/upgrade/request
+MakeDirectory=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > $P/lib/systemd/system/katam-upgrade.service <<'EOF'
+[Unit]
+Description=Upgrade Katam packages on this machine and restart Katam
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/katam/katam-self-upgrade
+TimeoutStartSec=1800
+EOF
 cat > $P/lib/systemd/system/katam.service <<'EOF'
 [Unit]
 Description=Katam Virtualization control plane
@@ -96,6 +120,7 @@ if [ "$1" = configure ]; then
   id katam >/dev/null 2>&1 || useradd -r -m -d /var/lib/katam -s /usr/sbin/nologin katam
   install -d -o katam -g katam -m 750 /var/lib/katam /var/lib/katam/console-tokens /var/lib/katam/staging /var/lib/katam/exports /var/lib/katam/.ssh /var/lib/katam/gitops
   [ -f /var/lib/katam/.ssh/id_ed25519 ] || su -s /bin/sh katam -c "ssh-keygen -q -t ed25519 -N '' -C katam@controller -f /var/lib/katam/.ssh/id_ed25519"
+  install -d -o katam -g katam -m 750 /var/lib/katam/upgrade
   install -d -m 755 /etc/katam
   if [ ! -f /etc/katam/config.yaml ]; then
     SECRET=$(openssl rand -hex 32)
@@ -111,6 +136,7 @@ if [ "$1" = configure ]; then
   fi
   systemctl daemon-reload || true
   systemctl enable katam katam-console >/dev/null 2>&1 || true
+  systemctl enable --now katam-upgrade.path >/dev/null 2>&1 || true
   echo "Katam: edit /etc/katam/config.yaml (nodes, storage, networks), then: systemctl restart katam katam-console"
   echo "Katam: controller SSH key for prepare-node: $(cat /var/lib/katam/.ssh/id_ed25519.pub)"
 fi
@@ -130,6 +156,9 @@ cp "$ROOT"/node-setup/* $N/usr/share/katam-node/
 chmod 755 $N/usr/share/katam-node/*.sh $N/usr/share/katam-node/katam-cluster
 ln -s /usr/share/katam-node/prepare-node.sh $N/usr/sbin/katam-node-setup
 ln -s /usr/share/katam-node/katam-cluster $N/usr/sbin/katam-cluster
+install -d -m 755 $N/etc/sudoers.d
+printf '# One-click upgrades: the controller restarts Katam on this node after upgrading it.\nkatam ALL=(root) NOPASSWD: /usr/bin/systemctl restart katam, /usr/bin/systemctl restart katam-console\n' > $N/etc/sudoers.d/katam-upgrade
+chmod 440 $N/etc/sudoers.d/katam-upgrade
 cat > $N/DEBIAN/control <<EOF
 Package: katam-node
 Version: $VER
@@ -216,6 +245,7 @@ if [[ -f "$ROOT/release/repo.conf" && -f "$ROOT/release/katam-archive-keyring.gp
   printf 'Package: katam-archive-keyring\nVersion: %s\nArchitecture: all\nMaintainer: Katam Virtualization <admin@katam.local>\nSection: admin\nPriority: optional\nDescription: Katam Virtualization update channel\n apt source and signing key for Katam package updates.\n' "$VER" > "$K/DEBIAN/control"
   for c in "$P" "$N" "$W"; do sed -i 's/^Depends: \(.*\)$/Depends: \1, katam-archive-keyring/' "$c/DEBIAN/control"; done
   PKGS="$PKGS katam-archive-keyring"
+  echo "${KATAM_APT_URL%/apt}/releases.json" > "$P/usr/share/katam/update-feed"
   echo "update channel: $KATAM_APT_URL (${KATAM_APT_CHANNEL:-stable})"
 fi
 

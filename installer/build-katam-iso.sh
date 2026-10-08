@@ -20,7 +20,7 @@
 # or mount it as virtual media through the server's BMC (iBMC, iDRAC, iLO, XCC, IPMI).
 set -euo pipefail
 
-VER=${VER:-0.5.0}
+VER=${VER:-0.5.1}
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEBS="$HERE/../packaging/dist"
 UBUNTU_URL=${UBUNTU_URL:-https://releases.ubuntu.com/24.04/ubuntu-24.04.3-live-server-amd64.iso}

@@ -116,6 +116,7 @@ jobs:
             --iso-url "$REL/download/${{ steps.v.outputs.tag }}/katam-virtualization-${{ steps.v.outputs.ver }}-amd64.iso" \
             --sha256 "$SHA" --notes-url "$REL/tag/${{ steps.v.outputs.tag }}" --feed site/releases.json
           cp website/download.html site/index.html
+          cp release/enable-updates.sh site/enable-updates.sh
           touch site/.nojekyll
 
       - name: Publish GitHub Pages

@@ -1,10 +1,25 @@
-## Katam Virtualization 0.5.0
+## Katam Virtualization 0.5.1
 
-**Download** `katam-virtualization-0.5.0-amd64.iso` below (BIOS and UEFI, installs offline) and check it:
+**One-click upgrades.** When a new release is out, admins see **Upgrade now** in the Katam UI. One
+click upgrades every node in turn (its VMs move to other nodes first, then it upgrades and comes back),
+restarts the controllers on those nodes, and finally upgrades and restarts the controller you are
+using; the page reconnects by itself on the new version. Running VMs keep running throughout.
+Optional: Ubuntu security updates and reboots in the same pass.
+
+Servers installed from this ISO are already on the signed update channel. Servers installed from
+0.4.0 or 0.5.0 need one command, once, on each server:
 
 ```bash
-shasum -a 256 -c katam-virtualization-0.5.0-amd64.iso.sha256    # macOS
-sha256sum -c katam-virtualization-0.5.0-amd64.iso.sha256        # Linux
+curl -fsSL https://raymondkatam.github.io/katam/enable-updates.sh | sudo sh
+```
+
+## Also in 0.5 (from 0.5.0)
+
+**Download** `katam-virtualization-0.5.1-amd64.iso` below (BIOS and UEFI, installs offline) and check it:
+
+```bash
+shasum -a 256 -c katam-virtualization-0.5.1-amd64.iso.sha256    # macOS
+sha256sum -c katam-virtualization-0.5.1-amd64.iso.sha256        # Linux
 ```
 
 ### New

@@ -1,0 +1,34 @@
+#!/bin/sh
+# Run by katam-upgrade.service (root) when the controller asks for it by writing
+# /var/lib/katam/upgrade/request ("Upgrade now" in the UI). Upgrades the Katam packages on this
+# machine from the configured apt channel, then restarts Katam. The result is written to
+# /var/lib/katam/upgrade/result.json for the UI.
+set -u
+DIR=/var/lib/katam/upgrade
+REQ=$DIR/request
+[ -f "$REQ" ] || exit 0
+OS=$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("include_os") else "")' "$REQ" 2>/dev/null || true)
+rm -f "$REQ"
+LOG=$DIR/last.log
+START=$(date +%s)
+BEFORE=$(dpkg-query -W -f='${Version}' katam-controller 2>/dev/null || echo none)
+APT="apt-get -y -q -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
+export DEBIAN_FRONTEND=noninteractive
+{
+  echo "== $(date -Is) upgrade requested (Katam $BEFORE)"
+  apt-get update -q
+  if [ -n "$OS" ]; then $APT upgrade; fi
+  PKGS=""
+  for p in katam-controller katam-node katam-witness katam-archive-keyring; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" && PKGS="$PKGS $p"
+  done
+  # shellcheck disable=SC2086
+  $APT install --only-upgrade $PKGS
+} > "$LOG" 2>&1
+RC=$?
+AFTER=$(dpkg-query -W -f='${Version}' katam-controller 2>/dev/null || echo none)
+printf '{"started": %s, "finished": %s, "ok": %s, "before": "%s", "after": "%s", "log": "%s"}\n' \
+  "$START" "$(date +%s)" "$([ $RC -eq 0 ] && echo true || echo false)" "$BEFORE" "$AFTER" "$LOG" > "$DIR/result.json"
+chown katam:katam "$DIR/result.json" "$LOG" 2>/dev/null || true
+systemctl restart katam katam-console 2>/dev/null || systemctl restart katam
+exit $RC

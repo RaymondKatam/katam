@@ -16,8 +16,10 @@ the packages and ISO, publishes a GitHub Release, and updates the signed apt rep
    - `KATAM_GPG_PRIVATE_KEY`: contents of `katam-signing-private.asc`
    - `KATAM_GPG_KEY_ID`: `you@example.com`
 4. **Enable Pages:** Settings > Pages > Deploy from a branch > `gh-pages` / root (the first release creates the branch).
-5. **Turn on automatic releases:** under Settings > Secrets and variables > Actions > Variables, add `KATAM_AUTO_RELEASE` = `true`. Until you do, pushing a tag builds nothing, so a hand-published release is never overwritten.
-6. **Edit the placeholders** `RaymondKatam` in `website/download.html`, and set the feed URL in `config.example.yaml` (`updates.feed_url: https://RaymondKatam.github.io/katam/releases.json`).
+5. **Or do steps 2-5 in one go from a Mac:** `enable-one-click-updates.command` creates the key, sets the
+   secrets and the variable, enables Pages and cuts the first release.
+6. **Turn on automatic releases:** under Settings > Secrets and variables > Actions > Variables, add `KATAM_AUTO_RELEASE` = `true`. Until you do, pushing a tag builds nothing, so a hand-published release is never overwritten.
+7. **Edit the placeholders** `RaymondKatam` in `website/download.html`, and set the feed URL in `config.example.yaml` (`updates.feed_url: https://RaymondKatam.github.io/katam/releases.json`).
 
 ## Cutting a release
 
@@ -35,6 +37,14 @@ Results:
 - `https://RaymondKatam.github.io/katam/apt`: signed apt repository (servers update from here)
 - `https://RaymondKatam.github.io/katam/releases.json`: update feed (controllers and your blog read it)
 - `https://RaymondKatam.github.io/katam/`: copy of the download page
+
+## What servers do with a release
+
+Packages built by the workflow carry the apt source and key (`katam-archive-keyring`) and the feed
+address (`/usr/share/katam/update-feed`). Controllers read the feed every few hours; admins see
+**Upgrade now**, which upgrades nodes one at a time and then the controllers (the controller upgrades
+itself through the root-owned `katam-upgrade.path` unit). Servers installed before the channel existed
+join it with `curl -fsSL https://raymondkatam.github.io/katam/enable-updates.sh | sudo sh`.
 
 ## Your blog
 

@@ -10,7 +10,7 @@
 #   sudo installer/build-netinstall-iso.sh
 set -euo pipefail
 
-VER=${VER:-0.5.0}
+VER=${VER:-0.5.1}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 WORK=${WORK:-$HERE/build-net}

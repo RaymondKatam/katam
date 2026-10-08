@@ -91,7 +91,14 @@ AWS, Wasabi): copies there can't be deleted by anyone until their retention date
 
 ## Updates
 
-Installed servers get new versions from a signed apt repository. Admins see an update banner in the UI; **Upgrade nodes** upgrades them one at a time after moving VMs away. Upgrade the controller with `sudo apt update && sudo apt upgrade`.
+One click. When a release is out, admins see **Upgrade now** at the top of the Katam UI. It upgrades
+every node in turn (VMs move away first), then the controllers, and the page reconnects on the new
+version. Running VMs keep running. Servers installed from 0.5.1 or later are already on the signed
+update channel; for older installs run this once on each server:
+
+```bash
+curl -fsSL https://raymondkatam.github.io/katam/enable-updates.sh | sudo sh
+```
 
 ## Status
 
